@@ -180,14 +180,15 @@ export class ProspeoService {
   }
 
   /**
-   * Stage 3 — Resolve each contact's LinkedIn URL to a verified work email
-   * via Prospeo's `linkedin-email-finder` endpoint.
+   * Stage 3 — Resolve each contact's email via Prospeo's Enrich Person endpoint.
+   *
+   * Endpoint: POST /enrich-person
+   * Accepts: person_id (from search), linkedin_url, or name + company
    *
    * Credit-conscious by design:
    *   - Sequential calls (no concurrency) so a flood of failures can't burn
    *     credits before the loop notices.
-   *   - Deduplicates LinkedIn URLs within the batch — a URL shared by multiple
-   *     contacts costs exactly one credit.
+   *   - Deduplicates by person_id within the batch — same person costs one credit.
    *   - Contacts that already carry a resolved email are passed through
    *     untouched (zero credits spent).
    *   - Failures mark `emailVerified: false` and keep the contact, never
@@ -213,34 +214,35 @@ export class ProspeoService {
         continue;
       }
 
-      // 2. No LinkedIn URL → can't resolve. Keep the contact, mark unverified.
-      const rawUrl = contact.linkedinUrl?.trim();
-      if (!rawUrl) {
+      // 2. Need either person_id or linkedin_url to enrich.
+      const personId = contact.prospeoPersonId;
+      const linkedinUrl = contact.linkedinUrl?.trim();
+      if (!personId && !linkedinUrl) {
         this.logger.warn(
           'prospeo',
-          `No LinkedIn URL for ${contact.fullName} — skipping enrichment`,
+          `No person_id or LinkedIn URL for ${contact.fullName} — skipping enrichment`,
         );
         enriched.push({ ...contact, emailVerified: false });
         continue;
       }
 
-      // 3. Dedupe by normalized URL — reuse the cached result for free.
-      const normalizedUrl = this.normalizeLinkedinUrl(rawUrl);
-      const cached = cache.get(normalizedUrl);
+      // 3. Dedupe by person_id — reuse the cached result for free.
+      const cacheKey = personId ?? linkedinUrl!;
+      const cached = cache.get(cacheKey);
       if (cached) {
         enriched.push(this.applyEmailResult(contact, cached));
         this.logger.info(
           'prospeo',
-          `Reused cached result for ${contact.fullName} (${normalizedUrl})`,
+          `Reused cached result for ${contact.fullName}`,
         );
         continue;
       }
 
       // 4. Sequential API call. Failures are isolated to this contact.
       try {
-        const result = await this.findEmailByLinkedin(normalizedUrl);
+        const result = await this.enrichPerson(contact);
         apiCalls++;
-        cache.set(normalizedUrl, result);
+        cache.set(cacheKey, result);
         enriched.push(this.applyEmailResult(contact, result));
 
         if (result.email) {
@@ -255,9 +257,9 @@ export class ProspeoService {
           );
         }
       } catch (err: any) {
-        // Cache the failure too — retrying the same URL would cost another credit.
+        // Cache the failure too — retrying the same person would cost another credit.
         const failed: CachedEmailResult = { verified: false };
-        cache.set(normalizedUrl, failed);
+        cache.set(cacheKey, failed);
         enriched.push(this.applyEmailResult(contact, failed));
         this.logger.error(
           'prospeo',
@@ -270,17 +272,39 @@ export class ProspeoService {
     this.logger.success(
       'prospeo',
       `Completed email resolution: ${successCount}/${contacts.length} emails resolved ` +
-        `(${apiCalls} API call${apiCalls === 1 ? '' : 's'}, ${cache.size} unique URL${cache.size === 1 ? '' : 's'}).`,
+        `(${apiCalls} API call${apiCalls === 1 ? '' : 's'}, ${cache.size} unique person${cache.size === 1 ? '' : 's'}).`,
     );
     return enriched;
   }
 
-  private async findEmailByLinkedin(linkedinUrl: string): Promise<CachedEmailResult> {
+  /**
+   * Enrich a single person via POST /enrich-person.
+   * Prefers person_id (free re-enrichment within 90 days), falls back to
+   * linkedin_url, then name + company_website.
+   */
+  private async enrichPerson(contact: Contact): Promise<CachedEmailResult> {
+    // Build the data payload — provide as many datapoints as possible for accuracy
+    const data: Record<string, string> = {};
+
+    if (contact.prospeoPersonId) {
+      data.person_id = contact.prospeoPersonId;
+    }
+    if (contact.linkedinUrl?.trim()) {
+      data.linkedin_url = contact.linkedinUrl.trim();
+    }
+    if (contact.firstName) data.first_name = contact.firstName;
+    if (contact.lastName) data.last_name = contact.lastName;
+    if (contact.fullName) data.full_name = contact.fullName;
+    if (contact.domain) data.company_website = contact.domain;
+
     const response = await this.retry.withRetry(
       () =>
         axios.post(
-          `${this.baseUrl}/linkedin-email-finder`,
-          { url: linkedinUrl },
+          `${this.baseUrl}/enrich-person`,
+          {
+            data,
+            only_verified_email: true,
+          },
           {
             headers: {
               'X-KEY': this.apiKey,
@@ -288,18 +312,29 @@ export class ProspeoService {
             },
           },
         ),
-      `prospeo.linkedinEmailFinder[${linkedinUrl}]`,
+      `prospeo.enrichPerson[${contact.fullName}]`,
     );
 
-    // Prospeo wraps successful responses in `response`; parse defensively
-    // so a shape change doesn't crash the run.
-    const data = response.data?.response ?? response.data ?? {};
-    const email: string | undefined = data.email;
-    const verified =
-      data.email_status === 'VERIFIED' ||
-      data.email_status === 'verified' ||
-      data.email_verified === true;
+    const resData = response.data;
 
+    // Handle error responses (NO_MATCH, etc.)
+    if (resData?.error) {
+      const code = resData.error_code ?? 'UNKNOWN';
+      if (code === 'NO_MATCH') {
+        return { verified: false };
+      }
+      throw new Error(`${code}`);
+    }
+
+    // Extract email from the person object in the response
+    const person = resData?.person ?? {};
+    const emailObj = person.email ?? {};
+    const email: string | undefined =
+      typeof emailObj === 'object' ? emailObj.email : undefined;
+    const verified =
+      emailObj?.status === 'VERIFIED';
+
+    // Also grab linkedin_url if we didn't have it
     return { email, verified };
   }
 
@@ -312,15 +347,6 @@ export class ProspeoService {
       };
     }
     return { ...contact, emailVerified: false };
-  }
-
-  /**
-   * Normalize LinkedIn URLs for dedup: trim, lowercase, strip trailing
-   * slashes. Keeps protocol + host so we don't accidentally collide
-   * different profiles.
-   */
-  private normalizeLinkedinUrl(url: string): string {
-    return url.trim().toLowerCase().replace(/\/+$/, '');
   }
 
   /**
