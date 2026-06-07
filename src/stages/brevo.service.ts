@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { Contact } from '../models';
+import { Contact, PipelineError } from '../models';
 import { RetryUtil } from '../utils/retry.util';
 import { PipelineLogger } from '../utils/pipeline.logger';
 
@@ -29,37 +29,71 @@ export class BrevoService {
    * Sends one email per contact with a verified email address.
    * Throttles to ~2 RPS (500ms delay) to stay under Brevo rate limits.
    * RetryUtil handles 429 / 5xx responses with exponential backoff.
+   * Includes per-send error isolation and deduplication by email.
    */
-  async sendOutreach(contacts: Contact[], seedDomain: string): Promise<number> {
-    const targets = contacts.filter((c) => c.email && c.emailVerified);
-    this.logger.info('brevo', `Sending outreach emails to ${targets.length} contacts...`);
+  async sendOutreach(
+    contacts: Contact[],
+    seedDomain: string,
+    errors?: PipelineError[],
+  ): Promise<number> {
+    // Deduplicate contacts by email address before sending
+    const seenEmails = new Set<string>();
+    const targets = contacts.filter((c) => {
+      if (!c.email || !c.emailVerified) return false;
+      const emailLower = c.email.toLowerCase().trim();
+      if (seenEmails.has(emailLower)) return false;
+      seenEmails.add(emailLower);
+      return true;
+    });
+
+    this.logger.info('brevo', `Sending outreach emails to ${targets.length} unique contact(s)...`);
 
     let sentCount = 0;
 
     for (const contact of targets) {
+      // Use firstName, title, company in subject
+      const subject = `Quick intro for ${contact.firstName} — ${contact.title} at ${contact.company}`;
+      
       const payload = {
         sender: { name: this.senderName, email: this.senderEmail },
         to: [{ email: contact.email!, name: contact.fullName }],
-        subject: `Quick intro — ${seedDomain}`,
+        subject,
         htmlContent: this.buildEmailHtml(contact, seedDomain),
+        textContent: this.buildEmailText(contact, seedDomain),
       };
 
-      await this.retry.withRetry(
-        () =>
-          axios.post(`${this.baseUrl}/smtp/email`, payload, {
-            headers: {
-              'api-key': this.apiKey,
-              'Content-Type': 'application/json',
-            },
-          }),
-        `brevo.send[${contact.email}]`,
-      );
+      try {
+        await this.retry.withRetry(
+          () =>
+            axios.post(`${this.baseUrl}/smtp/email`, payload, {
+              headers: {
+                'api-key': this.apiKey,
+                'Content-Type': 'application/json',
+              },
+            }),
+          `brevo.send[${contact.email}]`,
+        );
 
-      sentCount++;
-      this.logger.success(
-        'brevo',
-        `Outreach email successfully sent to ${contact.fullName} <${contact.email}> (Domain: ${seedDomain})`,
-      );
+        sentCount++;
+        this.logger.success(
+          'brevo',
+          `Outreach email successfully sent to ${contact.fullName} <${contact.email}>`,
+        );
+      } catch (err: any) {
+        // Per-send error isolation — log error and add to collection, continue with other sends
+        const errorMsg = err.response?.data?.message ?? err.message;
+        this.logger.error(
+          'brevo',
+          `Failed sending to ${contact.fullName} <${contact.email}>: ${errorMsg}`,
+        );
+        if (errors) {
+          errors.push({
+            stage: 'brevo',
+            message: `Failed sending to ${contact.fullName}: ${errorMsg}`,
+            context: contact.email,
+          });
+        }
+      }
 
       // Throttle to stay under Brevo rate limits (~2 RPS)
       if (sentCount < targets.length) {
@@ -78,6 +112,19 @@ export class BrevoService {
 and thought there might be a great fit with what we're building at ${seedDomain}.</p>
 <p>Would you be open to a quick 15-minute call this week?</p>
 <p>Best,<br/>Raj</p>
+    `.trim();
+  }
+
+  private buildEmailText(contact: Contact, seedDomain: string): string {
+    return `
+Hi ${contact.firstName},
+
+I noticed your work as ${contact.title} at ${contact.company} and thought there might be a great fit with what we're building at ${seedDomain}.
+
+Would you be open to a quick 15-minute call this week?
+
+Best,
+Raj
     `.trim();
   }
 

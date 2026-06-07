@@ -84,7 +84,7 @@ export class PipelineService {
     if (this.isDryRun) {
       this.logger.warn('pipeline', 'DRY_RUN=true — skipping Brevo send stage.');
     } else {
-      sent = await this.brevo.sendOutreach(enriched, seedDomain).catch((err) => {
+      sent = await this.brevo.sendOutreach(enriched, seedDomain, errors).catch((err) => {
         errors.push({ stage: 'brevo', message: err.message });
         return 0;
       });
@@ -135,7 +135,7 @@ export class PipelineService {
     console.log('');
     console.log(s(result.companiesFound,  'lookalike companies found'));
     console.log(s(result.contactsFound,   'decision-makers found'));
-    console.log(s(result.emailsResolved,  'emails resolved'));
+    console.log(s(result.emailsResolved,  'verified emails resolved'));
     console.log(s(result.emailsSent,      'emails sent'));
     if (result.errors.length) {
       console.log(s(result.errors.length, 'errors (see above)'));
