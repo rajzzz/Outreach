@@ -31,7 +31,7 @@ export class OceanService {
    * Request shape (per Ocean.io docs):
    *   {
    *     "size": 10,
-   *     "searchAfter": [...],            // optional — array cursor
+   *     "searchAfter": "NoRgLCBsk...",    // string cursor in actual API response (docs show array — incorrect)
    *     "companiesFilters": {
    *       "primaryLocations": { "includeCountries": [...] },
    *       "companySizes": ["51-200", ...],
@@ -59,7 +59,7 @@ export class OceanService {
 
     const seen = new Set<string>();
     const companies: Company[] = [];
-    let searchAfter: any[] | undefined;
+    let searchAfter: string | any[] | undefined;
     let pageNum = 0;
 
     do {
@@ -87,9 +87,11 @@ export class OceanService {
 
       const results = response.data?.companies ?? [];
       const total: number = response.data?.total ?? 0;
-      // searchAfter from Ocean.io is an array cursor; pass it back as-is.
-      searchAfter = Array.isArray(response.data?.searchAfter) && response.data.searchAfter.length > 0
-        ? response.data.searchAfter
+
+      // Ocean.io returns searchAfter as a string cursor (not an array despite docs).
+      const rawCursor = response.data?.searchAfter;
+      searchAfter = rawCursor && typeof rawCursor === 'string' ? rawCursor
+        : Array.isArray(rawCursor) && rawCursor.length > 0 ? rawCursor
         : undefined;
 
       for (const r of results) {
@@ -114,7 +116,7 @@ export class OceanService {
 
       this.logger.info(
         'ocean',
-        `Page ${pageNum} — ${results.length} returned, ${companies.length}/${this.maxCompanies} unique kept (total: ${total})`,
+        `Page ${pageNum} — ${results.length} returned, ${companies.length}/${this.maxCompanies} unique kept (total: ${total})${searchAfter ? '' : ' [no next cursor]'}`,
       );
     } while (searchAfter && companies.length < this.maxCompanies);
 
