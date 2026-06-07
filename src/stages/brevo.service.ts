@@ -17,10 +17,10 @@ export class BrevoService {
     private readonly retry: RetryUtil,
     private readonly logger: PipelineLogger,
   ) {
-    this.apiKey = this.config.getOrThrow<string>('BREVO_API_KEY');
+    this.apiKey = this.config.get<string>('BREVO_API_KEY')!;
     this.baseUrl = this.config.get<string>('BREVO_BASE_URL', 'https://api.brevo.com/v3');
     this.senderName = this.config.get<string>('BREVO_SENDER_NAME', 'Raj');
-    this.senderEmail = this.config.getOrThrow<string>('BREVO_SENDER_EMAIL');
+    this.senderEmail = this.config.get<string>('BREVO_SENDER_EMAIL')!;
   }
 
   /**

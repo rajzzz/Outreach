@@ -16,7 +16,7 @@ export class OceanService {
     private readonly retry: RetryUtil,
     private readonly logger: PipelineLogger,
   ) {
-    this.apiKey = this.config.getOrThrow<string>('OCEAN_API_KEY');
+    this.apiKey = this.config.get<string>('OCEAN_API_KEY')!;
     this.baseUrl = this.config.get<string>('OCEAN_BASE_URL', 'https://api.ocean.io');
     this.maxCompanies = parseInt(this.config.get<string>('MAX_COMPANIES', '10'), 10);
   }

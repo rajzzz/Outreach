@@ -22,7 +22,7 @@ export class ProspeoService {
     private readonly retry: RetryUtil,
     private readonly logger: PipelineLogger,
   ) {
-    this.apiKey = this.config.getOrThrow<string>('PROSPEO_API_KEY');
+    this.apiKey = this.config.get<string>('PROSPEO_API_KEY')!;
     this.baseUrl = this.config.get<string>('PROSPEO_BASE_URL', 'https://api.prospeo.io');
 
     // Sensible C-suite + VP defaults, overridable via .env
