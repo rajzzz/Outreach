@@ -1,45 +1,82 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 import { Company } from '../models';
+import { RetryUtil } from '../utils/retry.util';
 import { PipelineLogger } from '../utils/pipeline.logger';
 
 @Injectable()
 export class OceanService {
-  constructor(private readonly logger: PipelineLogger) {}
+  private readonly apiKey: string;
+  private readonly baseUrl: string;
+  private readonly pageSize: number;
 
+  constructor(
+    private readonly config: ConfigService,
+    private readonly retry: RetryUtil,
+    private readonly logger: PipelineLogger,
+  ) {
+    this.apiKey = this.config.getOrThrow<string>('OCEAN_API_KEY');
+    this.baseUrl = this.config.get<string>('OCEAN_BASE_URL', 'https://api.ocean.io');
+    this.pageSize = parseInt(this.config.get<string>('OCEAN_PAGE_SIZE', '50'), 10);
+  }
+
+  /**
+   * Stage 1 — Find lookalike companies via Ocean.io.
+   *
+   * Uses cursor-based pagination (`searchAfter`). Each page returns up to
+   * `pageSize` results. The loop ends when the API stops returning a cursor.
+   */
   async findLookalikes(seedDomain: string): Promise<Company[]> {
     this.logger.info('ocean', `Searching for lookalike companies of ${seedDomain}...`);
 
-    // Simulate API latency
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const allCompanies: Company[] = [];
+    let searchAfter: string | undefined;
 
-    const name = seedDomain.split('.')[0];
-    const capitalized = name.charAt(0).toUpperCase() + name.slice(1);
+    do {
+      const body: Record<string, any> = {
+        size: this.pageSize,
+        companiesFilters: {
+          similarTo: [seedDomain],
+        },
+      };
+      if (searchAfter) {
+        body.searchAfter = searchAfter;
+      }
 
-    const lookalikes: Company[] = [
-      {
-        domain: `${name}-global.com`,
-        name: `${capitalized} Global`,
-        industry: 'Technology & Software',
-        employeeCount: '500-1000',
-        location: 'San Francisco, CA',
-      },
-      {
-        domain: `get${name}.com`,
-        name: `Get ${capitalized}`,
-        industry: 'Financial Services',
-        employeeCount: '100-250',
-        location: 'New York, NY',
-      },
-      {
-        domain: `${name}hq.com`,
-        name: `${capitalized} HQ`,
-        industry: 'Enterprise Infrastructure',
-        employeeCount: '1000-5000',
-        location: 'London, UK',
-      },
-    ];
+      const response = await this.retry.withRetry(
+        () =>
+          axios.post(`${this.baseUrl}/v3/search/companies`, body, {
+            headers: {
+              'X-Api-Token': this.apiKey,
+              'Content-Type': 'application/json',
+            },
+          }),
+        'ocean.findLookalikes',
+      );
 
-    this.logger.success('ocean', `Found ${lookalikes.length} lookalike companies.`);
-    return lookalikes;
+      const results = response.data.results ?? [];
+      searchAfter = response.data.searchAfter ?? undefined;
+
+      for (const r of results) {
+        allCompanies.push({
+          domain: r.domain,
+          name: r.name,
+          industry: r.industry,
+          employeeCount: r.employeeRange,
+          location: r.hqLocation,
+          oceanId: r.id,
+          description: r.description,
+        });
+      }
+
+      this.logger.info(
+        'ocean',
+        `Fetched page — ${results.length} results (total: ${allCompanies.length})`,
+      );
+    } while (searchAfter);
+
+    this.logger.success('ocean', `Found ${allCompanies.length} lookalike companies.`);
+    return allCompanies;
   }
 }

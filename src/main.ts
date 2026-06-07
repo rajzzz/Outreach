@@ -1,7 +1,9 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { PipelineService } from './pipeline.service';
+import { validateConfig } from './config.validation';
 
 async function bootstrap() {
   const seedDomain = process.argv[2];
@@ -22,6 +24,10 @@ async function bootstrap() {
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: false, // silence NestJS internal logs
   });
+
+  // Fail-fast if required env vars are missing
+  const config = app.get(ConfigService);
+  validateConfig(config);
 
   const pipeline = app.get(PipelineService);
 

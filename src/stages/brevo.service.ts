@@ -1,26 +1,87 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 import { Contact } from '../models';
+import { RetryUtil } from '../utils/retry.util';
 import { PipelineLogger } from '../utils/pipeline.logger';
 
 @Injectable()
 export class BrevoService {
-  constructor(private readonly logger: PipelineLogger) {}
+  private readonly apiKey: string;
+  private readonly baseUrl: string;
+  private readonly senderName: string;
+  private readonly senderEmail: string;
 
+  constructor(
+    private readonly config: ConfigService,
+    private readonly retry: RetryUtil,
+    private readonly logger: PipelineLogger,
+  ) {
+    this.apiKey = this.config.getOrThrow<string>('BREVO_API_KEY');
+    this.baseUrl = this.config.get<string>('BREVO_BASE_URL', 'https://api.brevo.com/v3');
+    this.senderName = this.config.get<string>('BREVO_SENDER_NAME', 'VocalLabs');
+    this.senderEmail = this.config.getOrThrow<string>('BREVO_SENDER_EMAIL');
+  }
+
+  /**
+   * Stage 4 — Send outreach emails via Brevo transactional API.
+   *
+   * Sends one email per contact with a verified email address.
+   * Throttles to ~2 RPS (500ms delay) to stay under Brevo rate limits.
+   * RetryUtil handles 429 / 5xx responses with exponential backoff.
+   */
   async sendOutreach(contacts: Contact[], seedDomain: string): Promise<number> {
-    const targetContacts = contacts.filter((c) => c.email);
-    this.logger.info('brevo', `Sending outreach emails to ${targetContacts.length} contacts...`);
-
-    // Simulate API latency
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const targets = contacts.filter((c) => c.email);
+    this.logger.info('brevo', `Sending outreach emails to ${targets.length} contacts...`);
 
     let sentCount = 0;
-    for (const c of targetContacts) {
-      if (!c.email) continue;
-      this.logger.success('brevo', `Outreach email successfully sent to ${c.fullName} <${c.email}> (Domain: ${seedDomain})`);
+
+    for (const contact of targets) {
+      const payload = {
+        sender: { name: this.senderName, email: this.senderEmail },
+        to: [{ email: contact.email!, name: contact.fullName }],
+        subject: `Quick intro — ${seedDomain}`,
+        htmlContent: this.buildEmailHtml(contact, seedDomain),
+      };
+
+      await this.retry.withRetry(
+        () =>
+          axios.post(`${this.baseUrl}/smtp/email`, payload, {
+            headers: {
+              'api-key': this.apiKey,
+              'Content-Type': 'application/json',
+            },
+          }),
+        `brevo.send[${contact.email}]`,
+      );
+
       sentCount++;
+      this.logger.success(
+        'brevo',
+        `Outreach email successfully sent to ${contact.fullName} <${contact.email}> (Domain: ${seedDomain})`,
+      );
+
+      // Throttle to stay under Brevo rate limits (~2 RPS)
+      if (sentCount < targets.length) {
+        await this.sleep(500);
+      }
     }
 
     this.logger.success('brevo', `Successfully sent ${sentCount} outreach emails via Brevo.`);
     return sentCount;
+  }
+
+  private buildEmailHtml(contact: Contact, seedDomain: string): string {
+    return `
+<p>Hi ${contact.firstName},</p>
+<p>I noticed your work as ${contact.title} at ${contact.company}
+and thought there might be a great fit with what we're building at ${seedDomain}.</p>
+<p>Would you be open to a quick 15-minute call this week?</p>
+<p>Best,<br/>VocalLabs Team</p>
+    `.trim();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

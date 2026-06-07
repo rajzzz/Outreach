@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { OceanService } from './stages/ocean.service';
 import { ProspeoService } from './stages/prospeo.service';
 import { BrevoService } from './stages/brevo.service';
@@ -8,13 +9,18 @@ import { Company, Contact, PipelineResult } from './models';
 
 @Injectable()
 export class PipelineService {
+  private readonly isDryRun: boolean;
+
   constructor(
+    private readonly config: ConfigService,
     private readonly ocean: OceanService,
     private readonly prospeo: ProspeoService,
     private readonly brevo: BrevoService,
     private readonly checkpoint: CheckpointService,
     private readonly logger: PipelineLogger,
-  ) {}
+  ) {
+    this.isDryRun = this.config.get<string>('DRY_RUN', 'true') === 'true';
+  }
 
   async run(seedDomain: string): Promise<PipelineResult> {
     const startedAt = Date.now();
@@ -73,10 +79,16 @@ export class PipelineService {
 
     // ── Stage 4: send outreach ─────────────────────────────────────────
     this.logger.divider();
-    const sent = await this.brevo.sendOutreach(enriched, seedDomain).catch((err) => {
-      errors.push({ stage: 'brevo', message: err.message });
-      return 0;
-    });
+    let sent = 0;
+
+    if (this.isDryRun) {
+      this.logger.warn('pipeline', 'DRY_RUN=true — skipping Brevo send stage.');
+    } else {
+      sent = await this.brevo.sendOutreach(enriched, seedDomain).catch((err) => {
+        errors.push({ stage: 'brevo', message: err.message });
+        return 0;
+      });
+    }
 
     // ── Final summary ──────────────────────────────────────────────────
     const result = this.buildResult(

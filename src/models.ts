@@ -4,6 +4,8 @@ export interface Company {
   industry?: string;
   employeeCount?: string;
   location?: string;
+  oceanId?: string;        // Ocean.io internal ID
+  description?: string;    // company description from Ocean
 }
 
 export interface Contact {
@@ -14,8 +16,10 @@ export interface Contact {
   company: string;
   domain: string;
   linkedinUrl: string;
-  email?: string;          // populated by Prospeo in Stage 3
+  email?: string;            // populated by Prospeo enrichment
   emailVerified?: boolean;
+  prospeoPersonId?: string;  // Prospeo person_id for enrichment
+  mobile?: string;           // optional mobile from enrichment
 }
 
 export interface EmailPayload {
