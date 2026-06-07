@@ -59,7 +59,7 @@ export class PipelineService {
       return contacts; // proceed with unresolved — checkpoint will show the gap
     });
 
-    const emailsResolved = enriched.filter((c) => c.email).length;
+    const emailsResolved = enriched.filter((c) => c.email && c.emailVerified).length;
 
     // ── Safety checkpoint ──────────────────────────────────────────────
     const confirmed = await this.checkpoint.confirm(enriched);

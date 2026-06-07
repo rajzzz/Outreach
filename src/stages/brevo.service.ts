@@ -31,7 +31,7 @@ export class BrevoService {
    * RetryUtil handles 429 / 5xx responses with exponential backoff.
    */
   async sendOutreach(contacts: Contact[], seedDomain: string): Promise<number> {
-    const targets = contacts.filter((c) => c.email);
+    const targets = contacts.filter((c) => c.email && c.emailVerified);
     this.logger.info('brevo', `Sending outreach emails to ${targets.length} contacts...`);
 
     let sentCount = 0;

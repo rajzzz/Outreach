@@ -31,23 +31,25 @@ export class CheckpointService {
       const name   = chalk.white(c.fullName.padEnd(24).slice(0, 24));
       const title  = chalk.gray(c.title.padEnd(28).slice(0, 28));
       const co     = chalk.gray(c.company.padEnd(22).slice(0, 22));
-      const email  = c.email
+      const email  = (c.email && c.emailVerified)
         ? chalk.green(c.email)
-        : chalk.red('no email resolved');
+        : c.email
+        ? chalk.red(`${c.email} (unverified)`)
+        : chalk.red('missing');
       console.log(`  ${num}  ${name}  ${title}  ${co}  ${email}`);
     });
 
-    const withEmail = contacts.filter((c) => c.email).length;
+    const verifiedCount = contacts.filter((c) => c.email && c.emailVerified).length;
     console.log('');
     console.log(
-      chalk.gray(`  ${withEmail} of ${contacts.length} contacts have verified emails.`),
+      chalk.gray(`  ${verifiedCount} of ${contacts.length} contacts have verified emails.`),
     );
     console.log('');
     this.logger.divider();
     console.log('');
 
     return this.prompt(
-      chalk.yellow.bold(`  Send outreach to ${withEmail} contact(s)? [y/N] `),
+      chalk.yellow.bold(`  Send outreach to ${verifiedCount} contact(s)? [y/N] `),
     );
   }
 
@@ -60,7 +62,8 @@ export class CheckpointService {
 
       rl.question(question, (answer) => {
         rl.close();
-        resolve(answer.trim().toLowerCase() === 'y');
+        const lower = answer.trim().toLowerCase();
+        resolve(lower === 'y' || lower === 'yes');
       });
     });
   }
