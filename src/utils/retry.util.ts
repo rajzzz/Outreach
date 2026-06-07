@@ -91,9 +91,14 @@ export class RetryUtil {
    */
   private describe(error: any): string {
     const status = error?.response?.status;
+    const data = error?.response?.data;
+    // Combine error_code + filter_error for maximum clarity
+    const code = data?.error_code;
+    const detail = data?.filter_error;
     const apiMsg =
-      error?.response?.data?.message ??
-      error?.response?.data?.error ??
+      (code && detail ? `${code}: ${detail}` : code ?? detail) ??
+      data?.message ??
+      (typeof data?.error === 'string' ? data.error : undefined) ??
       error?.response?.statusText;
     if (status) {
       return apiMsg ? `${status} ${apiMsg}` : `HTTP ${status}`;

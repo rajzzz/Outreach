@@ -58,18 +58,19 @@ export class BrevoService {
         sender: { name: this.senderName, email: this.senderEmail },
         to: [{ email: contact.email!, name: contact.fullName }],
         subject,
-        htmlContent: this.buildEmailHtml(contact, seedDomain),
-        textContent: this.buildEmailText(contact, seedDomain),
+        htmlContent: this.buildEmailHtml(contact, seedDomain, this.senderName),
+        textContent: this.buildEmailText(contact, seedDomain, this.senderName),
       };
 
       try {
         await this.retry.withRetry(
           () =>
-            axios.post(`${this.baseUrl}/smtp/email`, payload, {
+          axios.post(`${this.baseUrl}/smtp/email`, payload, {
               headers: {
                 'api-key': this.apiKey,
                 'Content-Type': 'application/json',
               },
+              timeout: 10_000,
             }),
           `brevo.send[${contact.email}]`,
         );
@@ -105,17 +106,17 @@ export class BrevoService {
     return sentCount;
   }
 
-  private buildEmailHtml(contact: Contact, seedDomain: string): string {
+  private buildEmailHtml(contact: Contact, seedDomain: string, senderName: string): string {
     return `
 <p>Hi ${contact.firstName},</p>
 <p>I noticed your work as ${contact.title} at ${contact.company}
 and thought there might be a great fit with what we're building at ${seedDomain}.</p>
 <p>Would you be open to a quick 15-minute call this week?</p>
-<p>Best,<br/>Raj</p>
+<p>Best,<br/>${senderName}</p>
     `.trim();
   }
 
-  private buildEmailText(contact: Contact, seedDomain: string): string {
+  private buildEmailText(contact: Contact, seedDomain: string, senderName: string): string {
     return `
 Hi ${contact.firstName},
 
@@ -124,7 +125,7 @@ I noticed your work as ${contact.title} at ${contact.company} and thought there 
 Would you be open to a quick 15-minute call this week?
 
 Best,
-Raj
+${senderName}
     `.trim();
   }
 

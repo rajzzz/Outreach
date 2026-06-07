@@ -26,10 +26,10 @@ export class ProspeoService {
     this.baseUrl = this.config.get<string>('PROSPEO_BASE_URL', 'https://api.prospeo.io');
 
     // Prospeo seniority ENUM values (not Ocean.io values).
-    // Valid values: C-Level, VP, Director, Manager, Founder/Owner, etc.
+    // Valid: Founder/Owner, C-Suite, Partner, Vice President, Head, Director, Manager, Senior, Entry, Intern
     this.seniorityFilter = this.config.get<string>(
       'PROSPEO_SENIORITY_FILTER',
-      'C-Level,VP,Founder/Owner',
+      'C-Suite,Vice President,Founder/Owner',
     );
 
     this.maxContactsPerCompany = parseInt(
@@ -155,6 +155,15 @@ export class ProspeoService {
           `[${company.domain}] ${companyContacts.length}/${this.maxContactsPerCompany} contacts found`,
         );
       } catch (error: any) {
+        // Prospeo returns 400 for NO_RESULTS — treat as empty, not as failure
+        const errorCode = error?.response?.data?.error_code;
+        if (errorCode === 'NO_RESULTS') {
+          this.logger.info(
+            'prospeo',
+            `[${company.domain}] No results for given filters — skipping`,
+          );
+          continue;
+        }
         // Per-domain error isolation — log and continue, don't crash the run
         this.logger.warn(
           'prospeo',
