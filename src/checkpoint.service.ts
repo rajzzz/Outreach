@@ -20,11 +20,12 @@ export class CheckpointService {
       chalk.gray('Name'.padEnd(24)),
       chalk.gray('Title'.padEnd(28)),
       chalk.gray('Company'.padEnd(22)),
-      chalk.gray('Email'),
+      chalk.gray('Email'.padEnd(32)),
+      chalk.gray('LinkedIn'),
     ].join('  ');
 
     console.log(header);
-    console.log(chalk.gray('  ' + '─'.repeat(110)));
+    console.log(chalk.gray('  ' + '─'.repeat(140)));
 
     contacts.forEach((c, i) => {
       const num    = chalk.gray(String(i + 1).padStart(3));
@@ -32,11 +33,14 @@ export class CheckpointService {
       const title  = chalk.gray(c.title.padEnd(28).slice(0, 28));
       const co     = chalk.gray(c.company.padEnd(22).slice(0, 22));
       const email  = (c.email && c.emailVerified)
-        ? chalk.green(c.email)
+        ? chalk.green(c.email.padEnd(32).slice(0, 32))
         : c.email
-        ? chalk.red(`${c.email} (unverified)`)
-        : chalk.red('missing');
-      console.log(`  ${num}  ${name}  ${title}  ${co}  ${email}`);
+        ? chalk.red(`${c.email} (unverified)`.padEnd(32).slice(0, 32))
+        : chalk.red('missing'.padEnd(32));
+      const linkedin = c.linkedinUrl
+        ? chalk.cyan(c.linkedinUrl)
+        : chalk.gray('—');
+      console.log(`  ${num}  ${name}  ${title}  ${co}  ${email}  ${linkedin}`);
     });
 
     const verifiedCount = contacts.filter((c) => c.email && c.emailVerified).length;
