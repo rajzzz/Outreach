@@ -25,10 +25,11 @@ export class ProspeoService {
     this.apiKey = this.config.get<string>('PROSPEO_API_KEY')!;
     this.baseUrl = this.config.get<string>('PROSPEO_BASE_URL', 'https://api.prospeo.io');
 
-    // Sensible C-suite + VP defaults, overridable via .env
+    // Prospeo seniority ENUM values (not Ocean.io values).
+    // Valid values: C-Level, VP, Director, Manager, Founder/Owner, etc.
     this.seniorityFilter = this.config.get<string>(
       'PROSPEO_SENIORITY_FILTER',
-      'C_SUITE,VP',
+      'C-Level,VP,Founder/Owner',
     );
 
     this.maxContactsPerCompany = parseInt(
@@ -38,10 +39,27 @@ export class ProspeoService {
   }
 
   /**
-   * Stage 2 — Find decision-makers for each company via Prospeo Domain Search.
+   * Stage 2 — Find decision-makers for each company via Prospeo Search Person.
    *
-   * GET /domain-search  ?domain=...&seniority=C_SUITE,VP
-   * → { contacts: [{ firstName, lastName, title, linkedin_url }] }
+   * Endpoint: POST /search-person
+   * Request body:
+   *   {
+   *     "page": 1,
+   *     "filters": {
+   *       "company": { "websites": { "include": ["domain.com"] } },
+   *       "person_seniority": { "include": ["C-Level", "VP", "Founder/Owner"] }
+   *     }
+   *   }
+   *
+   * Response shape:
+   *   {
+   *     "error": false,
+   *     "results": [ { "person": {...}, "company": {...} }, ... ],  // up to 25 per page
+   *     "pagination": { "current_page": 1, "total_page": 11, "total_count": 271 }
+   *   }
+   *
+   *   NOTE: results do NOT contain email/mobile — enrichment happens in Stage 3.
+   *   NOTE: error_code "NO_RESULTS" (400) means no contacts for that domain — skip it.
    *
    * Processes companies sequentially to respect rate limits.
    * Per-domain error isolation — one failing domain doesn't crash the run.
@@ -55,51 +73,89 @@ export class ProspeoService {
     this.logger.info('prospeo', `Seniority filter: ${this.seniorityFilter}`);
 
     const contacts: Contact[] = [];
+    const seniorityIncludes = this.seniorityFilter
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     for (const company of companies) {
       try {
-        const response = await this.retry.withRetry(
-          () =>
-            axios.get(`${this.baseUrl}/domain-search`, {
-              params: {
-                domain: company.domain,
-                seniority: this.seniorityFilter,
-              },
-              headers: {
-                'X-KEY': this.apiKey,
-                'Content-Type': 'application/json',
-              },
-            }),
-          `prospeo.domainSearch[${company.domain}]`,
-        );
+        const companyContacts: Contact[] = [];
+        let page = 1;
+        let totalPages = 1;
 
-        const results = response.data.contacts ?? [];
+        do {
+          const response = await this.retry.withRetry(
+            () =>
+              axios.post(
+                `${this.baseUrl}/search-person`,
+                {
+                  page,
+                  filters: {
+                    company: {
+                      websites: { include: [company.domain] },
+                    },
+                    ...(seniorityIncludes.length && {
+                      person_seniority: { include: seniorityIncludes },
+                    }),
+                  },
+                },
+                {
+                  headers: {
+                    'X-KEY': this.apiKey,
+                    'Content-Type': 'application/json',
+                  },
+                  timeout: 10_000,
+                },
+              ),
+            `prospeo.searchPerson[${company.domain}][p${page}]`,
+          );
 
-        // Cap contacts per company
-        const capped = results.slice(0, this.maxContactsPerCompany);
+          // Prospeo signals NO_RESULTS as error:true with a 400 status.
+          // Treat it as "no contacts for this domain" — skip gracefully.
+          if (response.data?.error) {
+            const code: string = response.data.error_code ?? 'UNKNOWN';
+            if (code === 'NO_RESULTS') break;
+            throw new Error(`${code}: ${response.data.filter_error ?? code}`);
+          }
 
-        for (const person of capped) {
-          contacts.push({
-            firstName: person.firstName ?? person.first_name ?? '',
-            lastName: person.lastName ?? person.last_name ?? '',
-            fullName:
-              person.fullName ??
-              person.full_name ??
-              `${person.firstName ?? person.first_name ?? ''} ${person.lastName ?? person.last_name ?? ''}`.trim(),
-            title: person.title ?? person.job_title ?? '',
-            company: company.name ?? company.domain,
-            domain: company.domain,
-            linkedinUrl: person.linkedin_url ?? person.linkedinUrl ?? '',
-            prospeoPersonId: person.person_id,
-          });
-        }
+          const results: any[] = response.data?.results ?? [];
+          const pagination = response.data?.pagination;
+          totalPages = pagination?.total_page ?? 1;
+
+          for (const r of results) {
+            // Results are wrapped: { person: {...}, company: {...} }
+            const person = r.person ?? r;
+            const companyData = r.company ?? {};
+
+            companyContacts.push({
+              firstName: person.firstName ?? person.first_name ?? '',
+              lastName: person.lastName ?? person.last_name ?? '',
+              fullName:
+                person.fullName ??
+                person.full_name ??
+                `${person.firstName ?? person.first_name ?? ''} ${person.lastName ?? person.last_name ?? ''}`.trim(),
+              title: person.jobTitle ?? person.job_title ?? person.title ?? '',
+              company: companyData.name ?? company.name ?? company.domain,
+              domain: company.domain,
+              linkedinUrl: person.linkedin_url ?? person.linkedinUrl ?? '',
+              prospeoPersonId: person.person_id ?? person.id,
+            });
+
+            if (companyContacts.length >= this.maxContactsPerCompany) break;
+          }
+
+          page++;
+        } while (page <= totalPages && companyContacts.length < this.maxContactsPerCompany);
+
+        contacts.push(...companyContacts);
 
         this.logger.success(
           'prospeo',
-          `[${company.domain}] ${capped.length}/${this.maxContactsPerCompany} contacts found`,
+          `[${company.domain}] ${companyContacts.length}/${this.maxContactsPerCompany} contacts found`,
         );
       } catch (error: any) {
-        // Per-domain error isolation — log and continue, don't crash
+        // Per-domain error isolation — log and continue, don't crash the run
         this.logger.warn(
           'prospeo',
           `[${company.domain}] Skipped — ${error.message}`,
