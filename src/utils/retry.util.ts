@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { LogStage, PipelineLogger } from './pipeline.logger';
 
 export interface RetryOptions {
   maxAttempts?: number;
@@ -20,7 +21,7 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
 
 @Injectable()
 export class RetryUtil {
-  private readonly logger = new Logger(RetryUtil.name);
+  constructor(private readonly logger: PipelineLogger) {}
 
   async withRetry<T>(
     fn: () => Promise<T>,
@@ -28,6 +29,7 @@ export class RetryUtil {
     options: RetryOptions = {},
   ): Promise<T> {
     const opts = { ...DEFAULT_OPTIONS, ...options };
+    const stage = this.extractStage(context);
     let lastError: any;
 
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
@@ -40,7 +42,8 @@ export class RetryUtil {
 
         if (!shouldRetry || attempt === opts.maxAttempts) {
           this.logger.error(
-            `[${context}] Failed after ${attempt} attempt(s): ${error.message}`,
+            stage,
+            `[${context}] Failed after ${attempt} attempt(s): ${this.describe(error)}`,
           );
           throw error;
         }
@@ -56,6 +59,7 @@ export class RetryUtil {
         delayMs = Math.min(delayMs, opts.maxDelayMs);
 
         this.logger.warn(
+          stage,
           `[${context}] Attempt ${attempt} failed (status: ${status ?? 'network'}). Retrying in ${delayMs}ms...`,
         );
         await this.sleep(delayMs);
@@ -63,6 +67,38 @@ export class RetryUtil {
     }
 
     throw lastError;
+  }
+
+  /**
+   * Extract a LogStage from a context string of the form `<stage>.<operation>`.
+   * Falls back to 'pipeline' if the prefix doesn't match a known stage.
+   */
+  private extractStage(context: string): LogStage {
+    const prefix = context.split('.')[0];
+    if (
+      prefix === 'ocean' ||
+      prefix === 'prospeo' ||
+      prefix === 'brevo' ||
+      prefix === 'checkpoint'
+    ) {
+      return prefix;
+    }
+    return 'pipeline';
+  }
+
+  /**
+   * Build a one-line description of an axios/HTTP error for retry logs.
+   */
+  private describe(error: any): string {
+    const status = error?.response?.status;
+    const apiMsg =
+      error?.response?.data?.message ??
+      error?.response?.data?.error ??
+      error?.response?.statusText;
+    if (status) {
+      return apiMsg ? `${status} ${apiMsg}` : `HTTP ${status}`;
+    }
+    return error?.message ?? String(error);
   }
 
   private sleep(ms: number): Promise<void> {

@@ -36,8 +36,15 @@ export class PipelineService {
     });
 
     if (!companies.length) {
-      this.logger.error('pipeline', 'No companies returned from Ocean.io. Aborting.');
-      return this.buildResult(seedDomain, 0, 0, 0, 0, errors, startedAt);
+      const reason = errors.find((e) => e.stage === 'ocean')?.message;
+      this.logger.error(
+        'pipeline',
+        `No companies returned from Ocean.io. Aborting.${reason ? ` Reason: ${reason}` : ''}`,
+      );
+      const result = this.buildResult(seedDomain, 0, 0, 0, 0, errors, startedAt);
+      this.logger.divider();
+      this.printSummary(result);
+      return result;
     }
 
     // ── Stage 2: find decision-makers ──────────────────────────────────
@@ -48,8 +55,15 @@ export class PipelineService {
     });
 
     if (!contacts.length) {
-      this.logger.error('pipeline', 'No contacts returned from Prospeo. Aborting.');
-      return this.buildResult(seedDomain, companies.length, 0, 0, 0, errors, startedAt);
+      const reason = errors.find((e) => e.stage === 'prospeo')?.message;
+      this.logger.error(
+        'pipeline',
+        `No contacts returned from Prospeo. Aborting.${reason ? ` Reason: ${reason}` : ''}`,
+      );
+      const result = this.buildResult(seedDomain, companies.length, 0, 0, 0, errors, startedAt);
+      this.logger.divider();
+      this.printSummary(result);
+      return result;
     }
 
     // ── Stage 3: resolve work emails (also handled by Prospeo) ──────────
@@ -66,7 +80,7 @@ export class PipelineService {
 
     if (!confirmed) {
       this.logger.warn('pipeline', 'Aborted by user at checkpoint. No emails sent.');
-      return this.buildResult(
+      const result = this.buildResult(
         seedDomain,
         companies.length,
         contacts.length,
@@ -75,6 +89,9 @@ export class PipelineService {
         errors,
         startedAt,
       );
+      this.logger.divider();
+      this.printSummary(result);
+      return result;
     }
 
     // ── Stage 4: send outreach ─────────────────────────────────────────
@@ -138,7 +155,10 @@ export class PipelineService {
     console.log(s(result.emailsResolved,  'verified emails resolved'));
     console.log(s(result.emailsSent,      'emails sent'));
     if (result.errors.length) {
-      console.log(s(result.errors.length, 'errors (see above)'));
+      console.log(s(result.errors.length, 'errors:'));
+      result.errors.forEach((err) => {
+        console.log(`        • [${err.stage.toUpperCase()}] ${err.message}`);
+      });
     }
     console.log('');
     console.log(`  Duration: ${(result.durationMs / 1000).toFixed(1)}s`);

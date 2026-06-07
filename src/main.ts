@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import { INestApplicationContext } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { PipelineService } from './pipeline.service';
 import { validateConfig } from './config.validation';
@@ -20,13 +21,30 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  let app;
+  let app: INestApplicationContext | undefined;
+
   try {
     // Boot NestJS app context (no HTTP server)
     app = await NestFactory.createApplicationContext(AppModule, {
       logger: false, // silence NestJS internal logs
       abortOnError: false,
     });
+
+    // Graceful Ctrl+C / SIGTERM: close Nest context, then exit cleanly.
+    let interrupted = false;
+    const handleInterrupt = async (signal: string) => {
+      if (interrupted) return;
+      interrupted = true;
+      console.error(`\n\n  ${signal} received — shutting down cleanly...\n`);
+      try {
+        await app?.close();
+      } catch {
+        /* swallow shutdown errors — we're already exiting */
+      }
+      process.exit(130); // 128 + SIGINT(2)
+    };
+    process.on('SIGINT', () => handleInterrupt('SIGINT'));
+    process.on('SIGTERM', () => handleInterrupt('SIGTERM'));
 
     // Fail-fast if required env vars are missing
     const config = app.get(ConfigService);
@@ -36,7 +54,7 @@ async function bootstrap() {
     await pipeline.run(seedDomain);
   } catch (err: any) {
     console.error(`\n  Fatal error: ${err.message}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     if (app) {
       await app.close();
