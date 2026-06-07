@@ -1,66 +1,63 @@
 # Outreach Pipeline
 
-A small NestJS-based command-line tool that automates outbound email outreach. Given a single seed company domain, it discovers lookalike companies via Ocean.io, finds decision-makers and resolves their verified work emails via Prospeo, pauses for human review, and sends personalized outreach via Brevo.
+**One domain in, personalized outreach out.** A NestJS command-line tool that takes a single seed domain, finds lookalike companies, identifies decision-makers, resolves verified work emails, pauses for human review, and sends personalized outreach — all in one command.
 
-> **Status:** the three vendor integrations are now **live** — real HTTP calls to Ocean.io, Prospeo, and Brevo with auth, pagination, retry/backoff, and config validation. A `DRY_RUN` flag (default **on**) lets you run the full pipeline without actually sending email. See [Configuration](#configuration).
+> Live integrations against Ocean.io, Prospeo (LinkedIn email finder), and Brevo. `DRY_RUN=true` (the default) lets you exercise the full pipeline without sending email.
 
 ---
 
 ## Table of contents
 
-- [What it does](#what-it-does)
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [Architecture](#architecture)
-- [Project structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Setup (60 seconds)](#setup-60-seconds)
+- [Usage](#usage)
+- [Architecture overview](#architecture-overview)
 - [The pipeline stages](#the-pipeline-stages)
-- [Core types](#core-types)
+- [Edge case handling](#edge-case-handling)
 - [Configuration](#configuration)
-- [Logging & retry](#logging--retry)
 - [Email copy](#email-copy)
-- [Extending the pipeline](#extending-the-pipeline)
+- [Project structure](#project-structure)
+- [Logging & retry](#logging--retry)
+- [Polish & robustness checklist](#polish--robustness-checklist)
 - [Limitations & Roadmap](#limitations--roadmap)
 
 ---
 
-## What it does
+## Prerequisites
 
-```
-seed domain ─▶ find lookalike companies ─▶ find decision-makers ─▶ resolve emails
-   (Ocean.io)                              (Prospeo search)        (Prospeo enrich)
-                                                                        │
-                              outreach sent ◀── send ◀── human review ◀─┘
-                                 (Brevo)                  (checkpoint)
-```
-
-Starting from one domain (e.g. `stripe.com`), the pipeline produces a list of verified outreach contacts at similar companies and — after you approve them — sends emails. A safety checkpoint sits between resolution and sending so nothing goes out without a human in the loop, and `DRY_RUN` skips the send entirely until you're ready.
+- **Node.js 18+** (project targets ES2021 / Node 20 types)
+- **npm**
+- **API keys** for:
+  - Ocean.io (`X-Api-Token`)
+  - Prospeo (`X-KEY`)
+  - Brevo (`api-key`) plus a verified sender email
 
 ---
 
-## Quick start
-
-### Prerequisites
-
-- Node.js 18+ (the project targets ES2021 / Node 20 types)
-- npm
-- API keys for Ocean.io, Prospeo, and Brevo
-
-### Install
+## Setup (60 seconds)
 
 ```bash
-npm install
-```
+# 1. clone
+git clone <repo-url> outreach
+cd outreach
 
-### Configure
-
-```bash
+# 2. configure
 cp .env.example .env
-# then fill in your API keys
+# open .env and fill in OCEAN_API_KEY, PROSPEO_API_KEY,
+# BREVO_API_KEY, BREVO_SENDER_EMAIL
+
+# 3. install
+npm install
+
+# 4. run
+npm start stripe.com
 ```
 
-The pipeline fails fast at startup if any required key is missing (see [Configuration](#configuration)).
+The pipeline fails fast at startup if any required key is missing, with a clear message telling you which ones. `DRY_RUN=true` is on by default, so the first run won't actually send email — flip it to `false` once you've reviewed a checkpoint.
 
-### Run
+---
+
+## Usage
 
 ```bash
 npm start <domain>
@@ -72,13 +69,13 @@ Example:
 npm start stripe.com
 ```
 
-The CLI validates the domain format, validates env config, runs the four stages, prints a review table, and prompts before sending:
+The CLI validates the domain, validates env config, runs the four stages, prints a review table, and prompts before sending:
 
 ```
 Send outreach to N contact(s)? [y/N]
 ```
 
-Anything other than `y` aborts without sending. With `DRY_RUN=true` (the default), the send stage is skipped even after you confirm.
+Anything other than `y` / `yes` aborts without sending. With `DRY_RUN=true` the send stage is skipped even after you confirm. Press **Ctrl+C** at any time for a clean shutdown.
 
 ### Other scripts
 
@@ -93,29 +90,20 @@ Anything other than `y` aborts without sending. With `DRY_RUN=true` (the default
 
 ---
 
-## How it works
+## Architecture overview
 
-The entry point is [`src/main.ts`](src/main.ts). It is a thin **composition root**:
+The project uses a **flat, linear architecture** that mirrors the pipeline itself. Each stage is a NestJS service; `PipelineService` injects them by class and calls them in order. There are no port interfaces or DI tokens — every dependency is a typed class so the compiler verifies the wiring.
 
-1. Reads the seed domain from `process.argv`.
-2. Validates the argument looks like a domain.
-3. Boots a NestJS **application context** (no HTTP server — this is a CLI) via `NestFactory.createApplicationContext`.
-4. **Validates required environment variables** through `validateConfig` — fails fast before any API call if keys are missing.
-5. Resolves `PipelineService` from the DI container and calls `run(seedDomain)`.
-6. Closes the context and exits, mapping fatal errors to a non-zero exit code.
-
-`PipelineService` ([`src/pipeline.service.ts`](src/pipeline.service.ts)) is the **orchestrator**. It calls the four stage services in order, wraps each call in `.catch()` so a failure is recorded into `PipelineResult.errors` rather than crashing the run, pauses for human approval before the send stage, and honors `DRY_RUN`.
-
----
-
-## Architecture
-
-The project uses a **flat, linear architecture** that mirrors the pipeline itself. Each pipeline stage is a NestJS service; `PipelineService` injects them by class and calls them in order. There are no port interfaces, DI tokens, or separate domain/infrastructure layers.
+```
+seed domain ─▶ Ocean.io ─▶ Prospeo search ─▶ Prospeo LinkedIn email finder
+                                                              │
+                              outreach sent ◀── Brevo ◀── human review ◀─┘
+```
 
 ```
                         ┌──────────────────┐
                         │   main.ts (CLI)   │
-                        │ composition root  │
+                        │ + signal handlers │
                         │ + config validate │
                         └────────┬─────────┘
                                   │
@@ -134,119 +122,68 @@ The project uses a **flat, linear architecture** that mirrors the pipeline itsel
                    RetryUtil + axios + ConfigService
 ```
 
-**Why this shape:**
-- The pipeline is a fixed, linear sequence with one provider per stage.
-- All services live in one `AppModule`. Every dependency is a typed class, so the compiler verifies the wiring.
-- Each stage service reads its own config in the constructor (`getOrThrow` for required keys, `get` with defaults for optional ones) and shares `RetryUtil` and `PipelineLogger`.
-
----
-
-## Project structure
-
-```
-src/
-├── main.ts                       # CLI entry / composition root + config validation
-├── app.module.ts                 # Single NestJS module wiring everything
-├── config.validation.ts          # Fail-fast required-env-var check
-├── pipeline.service.ts           # Orchestrator (+ DRY_RUN gate)
-├── checkpoint.service.ts         # Interactive review prompt
-├── models.ts                     # Company, Contact, EmailPayload, PipelineResult
-├── stages/
-│   ├── ocean.service.ts          # Stage 1: lookalike companies (Ocean.io)
-│   ├── prospeo.service.ts        # Stages 2 + 3: contacts + email enrichment (Prospeo)
-│   └── brevo.service.ts          # Stage 4: send outreach (Brevo)
-└── utils/
-    ├── pipeline.logger.ts        # Color-coded per-stage console logger
-    └── retry.util.ts             # Exponential-backoff retry helper (wired into all stages)
-.env.example                      # Template for required configuration
-```
-
 ---
 
 ## The pipeline stages
 
 `PipelineService.run()` executes four stages plus a checkpoint. Each stage consumes the output of the previous one.
 
-| # | Stage             | Service / API                        | Input            | Output         |
-|---|-------------------|--------------------------------------|------------------|----------------|
-| 1 | Find lookalikes   | `OceanService` → `POST /v3/search/companies` | seed domain | `Company[]`    |
-| 2 | Find contacts     | `ProspeoService` → `POST /search-person`     | `Company[]` | `Contact[]`    |
-| 3 | Resolve emails    | `ProspeoService` → `POST /linkedin-email-finder` | `Contact[]` | `Contact[]`    |
-| — | **Safety review** | `CheckpointService` (stdin prompt)   | `Contact[]`      | `boolean`      |
-| 4 | Send outreach     | `BrevoService` → `POST /smtp/email`  | `Contact[]`      | count sent     |
+| # | Stage             | Service / API                                         | Input            | Output         |
+|---|-------------------|-------------------------------------------------------|------------------|----------------|
+| 1 | Find lookalikes   | `OceanService` → `POST /v3/search/companies`          | seed domain      | `Company[]`    |
+| 2 | Find contacts     | `ProspeoService` → `GET /domain-search`               | `Company[]`      | `Contact[]`    |
+| 3 | Resolve emails    | `ProspeoService` → `POST /linkedin-email-finder`      | `Contact[]`      | `Contact[]`    |
+| — | **Safety review** | `CheckpointService` (stdin prompt)                    | `Contact[]`      | `boolean`      |
+| 4 | Send outreach     | `BrevoService` → `POST /smtp/email`                   | `Contact[]`      | count sent     |
 
 ### Stage details
 
 - **Stage 1 — Ocean.io.** Cursor-based pagination via `searchAfter`, `OCEAN_PAGE_SIZE` results per page. Stops when the cursor runs out **or** `MAX_COMPANIES` is reached, then trims to the exact cap. Auth via `X-Api-Token`.
-- **Stage 2 — Prospeo search.** Iterates each company domain with page-based pagination, filtering by a configurable `PROSPEO_SENIORITY_FILTER` (defaults to C-suite + VP titles). Caps results to `MAX_CONTACTS_PER_COMPANY` per company. Auth via `X-KEY`.
-- **Stage 3 — Prospeo LinkedIn email finder.** Resolves each contact's LinkedIn URL to a verified work email (`POST /linkedin-email-finder`). Designed to be **credit-conscious**:
+- **Stage 2 — Prospeo domain search.** Queries each company's domain with a configurable `PROSPEO_SENIORITY_FILTER` (defaults to `C_SUITE,VP`). Caps results to `MAX_CONTACTS_PER_COMPANY`. Per-domain `try/catch` — one failing domain is logged and skipped, never crashes the run. Auth via `X-KEY`.
+- **Stage 3 — Prospeo LinkedIn email finder.** Resolves each contact's LinkedIn URL to a verified work email (`POST /linkedin-email-finder`). **Credit-conscious by design:**
   - **Sequential calls**, no parallelism — a flood of failures can't burn credits before the loop notices.
   - **Per-URL deduplication** within the batch — a LinkedIn URL shared across multiple contacts costs exactly one credit. Failures are cached too, so a bad URL isn't retried.
   - **Skips contacts that already have an email** — zero credits spent.
   - **Per-contact failure isolation** — a failed lookup marks `emailVerified: false` and keeps the contact (so the checkpoint can show the gap) instead of dropping it or aborting the batch.
-  - **Best-effort credit balance log** at the start of the stage (silent if the endpoint shape isn't supported by your plan).
-- **Stage 4 — Brevo.** Sends one personalized transactional email per contact with a verified address, throttled to ~2 RPS (500ms between sends) to respect rate limits. Auth via `api-key`. Skipped entirely when `DRY_RUN=true`.
-
-### Failure behavior
-
-- **Stage 1 (companies) empty/failed** → run aborts, returns a zeroed result.
-- **Stage 2 (contacts) empty/failed** → run aborts, returns partial result.
-- **Stage 3 (emails) failed** → proceeds with unresolved contacts so the checkpoint can show the gap.
-- **Checkpoint declined** → returns without sending.
-- **`DRY_RUN=true`** → send stage skipped; everything up to and including the checkpoint still runs.
-- Transient HTTP failures (429 / 5xx / network) are retried with backoff before a stage is considered failed. All caught errors are accumulated into `PipelineResult.errors` with the originating stage.
-
-At the end, a summary prints counts for companies found, contacts found, emails resolved, emails sent, errors, and total duration.
+  - **Best-effort credit balance log** at the start of the stage (silent if your plan doesn't expose it).
+- **Stage 4 — Brevo.** Sends one personalized transactional email per verified contact, throttled to ~2 RPS (500ms between sends). Auth via `api-key`. Skipped entirely when `DRY_RUN=true`.
+  - **Verified-only:** filters to `email && emailVerified`. Unverified contacts are visible at the checkpoint but never sent.
+  - **Email deduplication:** if two contacts share an email (lowercased), the second is skipped.
+  - **Per-send error isolation:** each send is wrapped in `try/catch`; a 4xx for one address gets logged and recorded into `PipelineResult.errors` while the rest of the batch continues.
+  - **Personalized subject + body** using `firstName`, `title`, `company`, and the seed domain. Both `htmlContent` and `textContent` (plaintext alternative) are sent.
 
 ---
 
-## Core types
+## Edge case handling
 
-Defined in [`src/models.ts`](src/models.ts):
+The pipeline is engineered to degrade gracefully rather than crash. Specific failure modes and how each is handled:
 
-```ts
-interface Company {
-  domain: string;
-  name?: string;
-  industry?: string;
-  employeeCount?: string;
-  location?: string;
-  oceanId?: string;        // Ocean.io internal ID
-  description?: string;    // company description from Ocean
-}
+| Failure mode                                | Behavior                                                                                                  |
+|---------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| Missing/invalid CLI domain                  | Validates with regex; exits with usage message before any API call.                                       |
+| Missing required env var                    | `validateConfig` fails fast at startup with a list of missing keys — no API calls happen.                 |
+| Ocean.io returns zero companies             | Run aborts after Stage 1, returns a zeroed result with the error logged.                                  |
+| Ocean.io transient failure (429/5xx)        | `RetryUtil` retries with exponential backoff, honoring `Retry-After` on 429.                              |
+| Prospeo search fails for one company        | Per-domain `try/catch` — that company is logged + skipped; other companies continue.                      |
+| Prospeo returns zero contacts               | Run aborts after Stage 2, returns partial result.                                                          |
+| Contact has no LinkedIn URL                 | Marked `emailVerified: false`, kept in the list, no API call (no credit spent).                           |
+| Two contacts share a LinkedIn URL           | API called once; result reused for the other(s) from cache (no extra credit).                             |
+| LinkedIn-email-finder fails for one contact | Per-contact `try/catch` — contact kept with `emailVerified: false`, failure cached, loop continues.       |
+| API returns email but unverified            | Counted as resolved-but-unverified; shown in red `(unverified)` at checkpoint; **not sent**.              |
+| User declines at checkpoint                 | Returns without sending. Counts in result reflect what was discovered.                                     |
+| `DRY_RUN=true`                              | Send stage skipped after confirmation. Everything else runs and prints normally.                           |
+| Two verified contacts share an email        | One send only — Brevo dedup by lowercased email.                                                          |
+| Brevo rejects a single send (400)           | Logged with the API's message; recorded to `errors`; the rest of the batch continues.                     |
+| Ctrl+C / SIGTERM at any point               | `SIGINT`/`SIGTERM` handler closes the Nest context cleanly and exits with code 130.                        |
+| Unhandled rejection / uncaught exception    | Top-level listeners print a clean message and exit with code 1 — no Node stack-trace dump on the user.    |
 
-interface Contact {
-  firstName: string;
-  lastName: string;
-  fullName: string;
-  title: string;
-  company: string;
-  domain: string;
-  linkedinUrl: string;
-  email?: string;            // populated in Stage 3
-  emailVerified?: boolean;
-  prospeoPersonId?: string;  // used to enrich in Stage 3
-  mobile?: string;           // optional, from enrichment
-}
-
-interface PipelineResult {
-  seedDomain: string;
-  companiesFound: number;
-  contactsFound: number;
-  emailsResolved: number;
-  emailsSent: number;
-  errors: PipelineError[];
-  durationMs: number;
-}
-```
-
-`Contact` is the spine of the pipeline — created in Stage 2 (carrying `prospeoPersonId`), enriched with a verified `email` in Stage 3, and consumed in Stage 4.
+The summary at the end always reports counts for companies found, decision-makers found, **verified** emails resolved, emails sent, errors, and total duration.
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in values. `validateConfig` ([`src/config.validation.ts`](src/config.validation.ts)) checks the **required** keys at startup and exits with a clear message if any are missing.
+Copy `.env.example` to `.env` and fill in values. `validateConfig` checks the **required** keys at startup and exits with a clear message if any are missing.
 
 | Variable                   | Required | Default                          | Purpose                                              |
 |----------------------------|:--------:|----------------------------------|------------------------------------------------------|
@@ -255,7 +192,7 @@ Copy `.env.example` to `.env` and fill in values. `validateConfig` ([`src/config
 | `OCEAN_PAGE_SIZE`          |          | `50`                             | Results per Ocean page                               |
 | `PROSPEO_API_KEY`          | ✅       | —                                | Prospeo auth (`X-KEY`)                               |
 | `PROSPEO_BASE_URL`         |          | `https://api.prospeo.io`         | Prospeo base URL                                     |
-| `PROSPEO_SENIORITY_FILTER` |          | `CEO,CTO,COO,CFO,VP …`           | Comma-separated seniority titles to target           |
+| `PROSPEO_SENIORITY_FILTER` |          | `C_SUITE,VP`                     | Seniority levels to target in domain-search          |
 | `BREVO_API_KEY`            | ✅       | —                                | Brevo auth (`api-key`)                               |
 | `BREVO_BASE_URL`           |          | `https://api.brevo.com/v3`       | Brevo base URL                                       |
 | `BREVO_SENDER_NAME`        |          | `Raj`                            | From-name on outreach emails                         |
@@ -266,7 +203,39 @@ Copy `.env.example` to `.env` and fill in values. `validateConfig` ([`src/config
 
 > Required keys: `OCEAN_API_KEY`, `PROSPEO_API_KEY`, `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`.
 
-TypeScript build settings live in [`tsconfig.json`](tsconfig.json) (`strictNullChecks`, `noImplicitAny`, ES2021 target, CommonJS modules).
+---
+
+## Email copy
+
+`BrevoService` composes a personalized HTML + plaintext email per contact:
+
+- **Subject:** `Quick intro for <firstName> — <title> at <company>`
+- **Body:** opens with the contact's first name, references their role and company, and ties it to the seed domain. The signature uses `BREVO_SENDER_NAME`.
+- Both `htmlContent` and `textContent` are included so non-HTML clients render correctly.
+
+Adjust `buildEmailHtml` / `buildEmailText` in [`src/stages/brevo.service.ts`](src/stages/brevo.service.ts) to tune the template.
+
+---
+
+## Project structure
+
+```
+src/
+├── main.ts                       # CLI entry, signal handlers, top-level error guards
+├── app.module.ts                 # Single NestJS module wiring everything
+├── config.validation.ts          # Fail-fast required-env-var check
+├── pipeline.service.ts           # Orchestrator (+ DRY_RUN gate)
+├── checkpoint.service.ts         # Interactive review prompt
+├── models.ts                     # Company, Contact, EmailPayload, PipelineResult
+├── stages/
+│   ├── ocean.service.ts          # Stage 1: lookalike companies (Ocean.io)
+│   ├── prospeo.service.ts        # Stages 2 + 3: contacts + LinkedIn email finder
+│   └── brevo.service.ts          # Stage 4: personalized outreach (Brevo)
+└── utils/
+    ├── pipeline.logger.ts        # Color-coded per-stage console logger
+    └── retry.util.ts             # Exponential-backoff retry helper (wired into all stages)
+.env.example                      # Template for required configuration
+```
 
 ---
 
@@ -274,46 +243,35 @@ TypeScript build settings live in [`tsconfig.json`](tsconfig.json) (`strictNullC
 
 ### `PipelineLogger`
 
-A simple `@Injectable()` console logger that renders per-stage, color-coded output via `chalk` with `info` / `success` / `warn` / `error` levels plus `divider()` and `banner()` helpers. Stages: `ocean`, `prospeo`, `brevo`, `pipeline`, `checkpoint`.
+Per-stage, color-coded `info` / `success` / `warn` / `error` levels with `divider()` and `banner()` helpers. Stages: `ocean`, `prospeo`, `brevo`, `pipeline`, `checkpoint`.
 
 ### `RetryUtil`
 
-`withRetry(fn, context, options)` wraps every outbound HTTP call in all three stage services. It provides:
+`withRetry(fn, context, options)` wraps every outbound HTTP call:
 - Exponential backoff (`initialDelayMs * 2^(attempt-1)`, capped at `maxDelayMs`; defaults 3 attempts, 1s→10s).
-- A retry predicate that retries on `429` and `5xx` (and network errors) but not `4xx`.
-- Honors a `Retry-After` header on `429` responses.
-
-Each call passes a descriptive `context` string (e.g. `prospeo.bulkEnrich[batch2]`, `brevo.send[<email>]`) so retry logs pinpoint the failing operation.
-
----
-
-## Email copy
-
-`BrevoService.buildEmailHtml` composes a short, personalized HTML email per contact using the data gathered upstream — first name, title, and company — referencing the seed domain. The subject is `Quick intro — <seedDomain>` and the signature uses `BREVO_SENDER_NAME`. Adjust the template in [`src/stages/brevo.service.ts`](src/stages/brevo.service.ts) to tune tone and content.
+- Retries on `429` / `5xx` / network errors. Does **not** retry `4xx`.
+- Honors `Retry-After` on `429`.
+- Each call passes a descriptive `context` (e.g. `prospeo.linkedinEmailFinder[<url>]`, `brevo.send[<email>]`) so retry logs pinpoint the failing operation.
 
 ---
 
-## Extending the pipeline
+## Polish & robustness checklist
 
-### Replace a stage's implementation
-
-Edit the relevant service in `src/stages/`. Each stage owns its own API client, config, and pagination, so changes stay localized to one file.
-
-### Add a new stage
-
-1. Create a new service under `src/stages/` with a single public method.
-2. Register it in `app.module.ts` under `providers`.
-3. Inject it into `PipelineService` and add a step in `run()`.
-
-### Run the checkpoint headlessly
-
-`CheckpointService.confirm` could accept a `--yes` flag (or check `process.stdin.isTTY`) to auto-confirm in non-interactive runs. Today it always prompts, which will hang in CI.
+| Item                                          | Status | Where                                                                                       |
+|-----------------------------------------------|:------:|---------------------------------------------------------------------------------------------|
+| No unhandled promise rejections               | ✅     | `process.on('unhandledRejection' / 'uncaughtException')` + `bootstrap().catch(...)` in `main.ts` |
+| Graceful exit on Ctrl+C / SIGTERM             | ✅     | `SIGINT` and `SIGTERM` handlers close the Nest context and exit 130                         |
+| Fail-fast on missing config                   | ✅     | `config.validation.ts`                                                                      |
+| Clean terminal output end to end              | ✅     | All output via `chalk` through `PipelineLogger`; structured tables in checkpoint            |
+| No debug `console.log` in prod paths          | ✅     | Only intentional user-facing output (banners, prompts, summary) uses raw `console`           |
+| `.env.example` complete and accurate          | ✅     | Mirrors every variable read by `OceanService`, `ProspeoService`, `BrevoService`             |
+| End-to-end run from clone to send             | ✅     | `git clone → cp .env.example .env → npm install → npm start <domain>`                       |
 
 ---
 
 ## Limitations & Roadmap
 
-Done in recent work: ✅ live Ocean.io / Prospeo / Brevo integrations with auth + pagination, ✅ `RetryUtil` wired into every HTTP call, ✅ `ConfigService` + fail-fast validation, ✅ personalized email composition, ✅ `DRY_RUN` safety default, ✅ per-company and total caps.
+Done in recent work: ✅ live Ocean.io / Prospeo / Brevo integrations with auth + pagination, ✅ `RetryUtil` wired into every HTTP call, ✅ `ConfigService` + fail-fast validation, ✅ personalized email composition (HTML + plaintext), ✅ `DRY_RUN` safety default, ✅ per-company and total caps, ✅ credit-conscious LinkedIn email resolution (URL dedup, sequential, per-contact isolation, balance log), ✅ Brevo per-send isolation + email dedup, ✅ end-to-end gating on `email && emailVerified`, ✅ Ctrl+C and unhandled-rejection handlers.
 
 Still outstanding, in rough priority order:
 
@@ -321,7 +279,7 @@ Still outstanding, in rough priority order:
 - [ ] **Concurrency for Stage 2.** Companies are searched sequentially; a bounded-concurrency map would cut wall-clock time on larger `MAX_COMPANIES`. Stage 3 stays sequential by design (credit safety).
 
 **Operations & compliance**
-- [ ] **Idempotency and a suppression list.** Re-running re-sends to everyone — an operational and CAN-SPAM/GDPR concern. No record of who was already contacted.
+- [ ] **Idempotency and a suppression list.** Re-running re-sends to everyone — an operational and CAN-SPAM/GDPR concern. No persistent record of who was already contacted.
 - [ ] **`--yes` / non-interactive flag** so the stdin checkpoint doesn't block CI runs.
 - [ ] **Route `printSummary` and checkpoint output through `PipelineLogger`** for a single, consistent output path.
 
@@ -329,7 +287,6 @@ Still outstanding, in rough priority order:
 - [ ] **Add tests.** Unit-test `PipelineService` against faked stage services; mock `axios` for per-stage API tests.
 - [ ] **Use the `EmailPayload` type** in `BrevoService` (the payload is currently built inline; the defined interface is unused).
 - [ ] **Update `package.json` description** — it still says "with Domain-Driven Design" from the previous architecture.
-- [ ] **Clean stale `dist/` artifacts** from the previous layout (`rm -rf dist && npm run build`).
 
 ---
 
