@@ -9,6 +9,8 @@ import { PipelineLogger } from '../utils/pipeline.logger';
 export class ProspeoService {
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  private readonly seniorityFilter: string[];
+  private readonly maxContactsPerCompany: number;
 
   constructor(
     private readonly config: ConfigService,
@@ -17,6 +19,18 @@ export class ProspeoService {
   ) {
     this.apiKey = this.config.getOrThrow<string>('PROSPEO_API_KEY');
     this.baseUrl = this.config.get<string>('PROSPEO_BASE_URL', 'https://api.prospeo.io');
+
+    // Sensible C-suite + VP defaults, overridable via .env
+    const defaultSeniority = 'CEO,CTO,COO,CFO,VP Engineering,VP Product,Head of Engineering';
+    this.seniorityFilter = this.config
+      .get<string>('PROSPEO_SENIORITY_FILTER', defaultSeniority)
+      .split(',')
+      .map((s) => s.trim());
+
+    this.maxContactsPerCompany = parseInt(
+      this.config.get<string>('MAX_CONTACTS_PER_COMPANY', '3'),
+      10,
+    );
   }
 
   private get headers() {
@@ -30,7 +44,8 @@ export class ProspeoService {
    * Stage 2 — Find decision-makers for each company via Prospeo Search Person API.
    *
    * Iterates through each company domain, using page-based pagination
-   * (25 results/page, up to 1000 pages). Filters by VP/CXO/Director/Head seniority.
+   * (25 results/page). Filters by configurable seniority levels.
+   * Caps contacts per company to `MAX_CONTACTS_PER_COMPANY`.
    */
   async findDecisionMakers(companies: Company[]): Promise<Contact[]> {
     this.logger.info(
@@ -40,9 +55,15 @@ export class ProspeoService {
 
     const contacts: Contact[] = [];
 
+    this.logger.info(
+      'prospeo',
+      `Seniority filter: ${this.seniorityFilter.join(', ')}`,
+    );
+
     for (const company of companies) {
       let page = 1;
       let totalPages = 1;
+      let companyContacts = 0;
 
       do {
         const response = await this.retry.withRetry(
@@ -52,7 +73,7 @@ export class ProspeoService {
               {
                 filters: {
                   person_search: company.domain,
-                  person_seniority: ['VP', 'CXO', 'Director', 'Head'],
+                  person_seniority: this.seniorityFilter,
                 },
                 page,
               },
@@ -65,6 +86,8 @@ export class ProspeoService {
         totalPages = data.pagination?.total_page ?? 1;
 
         for (const person of data.results ?? []) {
+          if (companyContacts >= this.maxContactsPerCompany) break;
+
           contacts.push({
             firstName: person.first_name,
             lastName: person.last_name,
@@ -75,15 +98,16 @@ export class ProspeoService {
             linkedinUrl: person.linkedin_url ?? '',
             prospeoPersonId: person.person_id,
           });
+          companyContacts++;
         }
 
         this.logger.info(
           'prospeo',
-          `[${company.domain}] Page ${page}/${totalPages} — ${(data.results ?? []).length} contacts`,
+          `[${company.domain}] Page ${page}/${totalPages} — ${companyContacts}/${this.maxContactsPerCompany} contacts`,
         );
 
         page++;
-      } while (page <= totalPages);
+      } while (page <= totalPages && companyContacts < this.maxContactsPerCompany);
     }
 
     this.logger.success(

@@ -19,7 +19,7 @@ export class BrevoService {
   ) {
     this.apiKey = this.config.getOrThrow<string>('BREVO_API_KEY');
     this.baseUrl = this.config.get<string>('BREVO_BASE_URL', 'https://api.brevo.com/v3');
-    this.senderName = this.config.get<string>('BREVO_SENDER_NAME', 'VocalLabs');
+    this.senderName = this.config.get<string>('BREVO_SENDER_NAME', 'Raj');
     this.senderEmail = this.config.getOrThrow<string>('BREVO_SENDER_EMAIL');
   }
 
@@ -77,7 +77,7 @@ export class BrevoService {
 <p>I noticed your work as ${contact.title} at ${contact.company}
 and thought there might be a great fit with what we're building at ${seedDomain}.</p>
 <p>Would you be open to a quick 15-minute call this week?</p>
-<p>Best,<br/>VocalLabs Team</p>
+<p>Best,<br/>Raj</p>
     `.trim();
   }
 
