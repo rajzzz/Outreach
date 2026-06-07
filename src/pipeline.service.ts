@@ -1,35 +1,19 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { CompanyDirectory } from '../domain/ports/company-directory.port';
-import { ContactFinder } from '../domain/ports/contact-finder.port';
-import { EmailResolver } from '../domain/ports/email-resolver.port';
-import { OutreachSender } from '../domain/ports/outreach-sender.port';
-import { Checkpoint } from '../domain/ports/checkpoint.port';
-import { LoggerPort } from '../../shared/logger/logger.port';
-import { LOGGER_PORT } from '../../shared/logger/logger.port';
-import { Company, Contact, PipelineResult } from '../domain/models/outreach.models';
-import {
-  COMPANY_DIRECTORY_PORT,
-  CONTACT_FINDER_PORT,
-  EMAIL_RESOLVER_PORT,
-  OUTREACH_SENDER_PORT,
-  CHECKPOINT_PORT,
-} from '../tokens';
+import { Injectable } from '@nestjs/common';
+import { OceanService } from './stages/ocean.service';
+import { ProspeoService } from './stages/prospeo.service';
+import { BrevoService } from './stages/brevo.service';
+import { CheckpointService } from './checkpoint.service';
+import { PipelineLogger } from './utils/pipeline.logger';
+import { Company, Contact, PipelineResult } from './models';
 
 @Injectable()
-export class OutreachPipelineService {
+export class PipelineService {
   constructor(
-    @Inject(COMPANY_DIRECTORY_PORT)
-    private readonly ocean: CompanyDirectory,
-    @Inject(CONTACT_FINDER_PORT)
-    private readonly prospeo: ContactFinder,
-    @Inject(EMAIL_RESOLVER_PORT)
-    private readonly eazyreach: EmailResolver,
-    @Inject(OUTREACH_SENDER_PORT)
-    private readonly brevo: OutreachSender,
-    @Inject(CHECKPOINT_PORT)
-    private readonly checkpoint: Checkpoint,
-    @Inject(LOGGER_PORT)
-    private readonly logger: LoggerPort,
+    private readonly ocean: OceanService,
+    private readonly prospeo: ProspeoService,
+    private readonly brevo: BrevoService,
+    private readonly checkpoint: CheckpointService,
+    private readonly logger: PipelineLogger,
   ) {}
 
   async run(seedDomain: string): Promise<PipelineResult> {
@@ -62,10 +46,10 @@ export class OutreachPipelineService {
       return this.buildResult(seedDomain, companies.length, 0, 0, 0, errors, startedAt);
     }
 
-    // ── Stage 3: resolve work emails ───────────────────────────────────
+    // ── Stage 3: resolve work emails (also handled by Prospeo) ──────────
     this.logger.divider();
-    const enriched: Contact[] = await this.eazyreach.resolveEmails(contacts).catch((err) => {
-      errors.push({ stage: 'eazyreach', message: err.message });
+    const enriched: Contact[] = await this.prospeo.resolveEmails(contacts).catch((err) => {
+      errors.push({ stage: 'prospeo', message: err.message });
       return contacts; // proceed with unresolved — checkpoint will show the gap
     });
 

@@ -1,16 +1,12 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import * as readline from 'readline';
 import chalk from 'chalk';
-import { Contact } from '../../domain/models/outreach.models';
-import { Checkpoint } from '../../domain/ports/checkpoint.port';
-import { LoggerPort, LOGGER_PORT } from '../../../shared/logger/logger.port';
+import { Contact } from './models';
+import { PipelineLogger } from './utils/pipeline.logger';
 
 @Injectable()
-export class ConsoleCheckpointAdapter implements Checkpoint {
-  constructor(
-    @Inject(LOGGER_PORT)
-    private readonly logger: LoggerPort,
-  ) {}
+export class CheckpointService {
+  constructor(private readonly logger: PipelineLogger) {}
 
   async confirm(contacts: Contact[]): Promise<boolean> {
     this.logger.divider();

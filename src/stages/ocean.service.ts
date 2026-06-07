@@ -1,14 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { Company } from '../../domain/models/outreach.models';
-import { CompanyDirectory } from '../../domain/ports/company-directory.port';
-import { LoggerPort, LOGGER_PORT } from '../../../shared/logger/logger.port';
+import { Injectable } from '@nestjs/common';
+import { Company } from '../models';
+import { PipelineLogger } from '../utils/pipeline.logger';
 
 @Injectable()
-export class OceanAdapter implements CompanyDirectory {
-  constructor(
-    @Inject(LOGGER_PORT)
-    private readonly logger: LoggerPort,
-  ) {}
+export class OceanService {
+  constructor(private readonly logger: PipelineLogger) {}
 
   async findLookalikes(seedDomain: string): Promise<Company[]> {
     this.logger.info('ocean', `Searching for lookalike companies of ${seedDomain}...`);

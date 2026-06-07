@@ -1,9 +1,3 @@
-/**
- * outreach.models.ts
- * The three core types that flow through the pipeline.
- * Each stage accepts one type and returns the next.
- */
-
 export interface Company {
   domain: string;
   name?: string;
@@ -20,7 +14,7 @@ export interface Contact {
   company: string;
   domain: string;
   linkedinUrl: string;
-  email?: string;          // populated by Eazyreach in Stage 3
+  email?: string;          // populated by Prospeo in Stage 3
   emailVerified?: boolean;
 }
 
@@ -44,7 +38,7 @@ export interface PipelineResult {
 }
 
 export interface PipelineError {
-  stage: 'ocean' | 'prospeo' | 'eazyreach' | 'brevo';
+  stage: 'ocean' | 'prospeo' | 'brevo';
   message: string;
   context?: string;
 }

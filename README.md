@@ -1,8 +1,8 @@
-# VocalLabs Outreach Pipeline
+# Outreach Pipeline
 
-A command-line outreach automation pipeline built with **NestJS** and a **hexagonal (ports-and-adapters)** architecture. Given a single seed company domain, it discovers lookalike companies, finds decision-makers at those companies, resolves their work emails, pauses for human review, and sends outreach.
+A small NestJS-based command-line tool that automates outbound email outreach. Given a single seed company domain, it discovers lookalike companies, finds decision-makers at those companies, resolves their work emails, pauses for human review, and sends.
 
-> **Status:** The four vendor integrations (Ocean.io, Prospeo, Eazyreach, Brevo) are currently **simulated** with realistic mock data and latency. The architecture is production-shaped; the network calls are not yet implemented. See [Limitations & Roadmap](#limitations--roadmap).
+> **Status:** the three vendor integrations (Ocean.io, Prospeo, Brevo) are currently **simulated** with realistic mock data and latency. The pipeline shape is real; the network calls are not yet implemented. See [Limitations & Roadmap](#limitations--roadmap).
 
 ---
 
@@ -14,8 +14,8 @@ A command-line outreach automation pipeline built with **NestJS** and a **hexago
 - [Architecture](#architecture)
 - [Project structure](#project-structure)
 - [The pipeline stages](#the-pipeline-stages)
-- [Core domain model](#core-domain-model)
-- [Cross-cutting concerns](#cross-cutting-concerns)
+- [Core types](#core-types)
+- [Logging & retry](#logging--retry)
 - [Extending the pipeline](#extending-the-pipeline)
 - [Configuration](#configuration)
 - [Limitations & Roadmap](#limitations--roadmap)
@@ -65,18 +65,18 @@ The CLI validates the domain format, runs the four stages, prints a review table
 Send outreach to N contact(s)? [y/N]
 ```
 
-Answering anything other than `y` aborts without sending.
+Anything other than `y` aborts without sending.
 
 ### Other scripts
 
-| Script              | Purpose                                            |
-|---------------------|----------------------------------------------------|
-| `npm start`         | Run the pipeline via `ts-node`                     |
-| `npm run start:dev` | Run in watch mode (`nest start --watch`)           |
-| `npm run build`     | Compile TypeScript to `dist/` (`nest build`)       |
-| `npm run start:prod`| Run the compiled output (`node dist/main`)         |
-| `npm run lint`      | ESLint with `--fix`                                |
-| `npm run format`    | Prettier formatting                                |
+| Script               | Purpose                                            |
+|----------------------|----------------------------------------------------|
+| `npm start`          | Run the pipeline via `ts-node`                     |
+| `npm run start:dev`  | Run in watch mode (`nest start --watch`)           |
+| `npm run build`      | Compile TypeScript to `dist/` (`nest build`)       |
+| `npm run start:prod` | Run the compiled output (`node dist/main`)         |
+| `npm run lint`       | ESLint with `--fix`                                |
+| `npm run format`     | Prettier formatting                                |
 
 ---
 
@@ -87,62 +87,38 @@ The entry point is [`src/main.ts`](src/main.ts). It is a thin **composition root
 1. Reads the seed domain from `process.argv`.
 2. Validates the argument looks like a domain.
 3. Boots a NestJS **application context** (no HTTP server — this is a CLI) via `NestFactory.createApplicationContext`.
-4. Resolves `OutreachPipelineService` from the DI container and calls `run(seedDomain)`.
+4. Resolves `PipelineService` from the DI container and calls `run(seedDomain)`.
 5. Closes the context and exits, mapping fatal errors to a non-zero exit code.
 
-`OutreachPipelineService` ([`application/outreach-pipeline.service.ts`](src/outreach/application/outreach-pipeline.service.ts)) is the **orchestrator**. It depends only on **port interfaces**, never on concrete adapters. Each stage is wrapped so a failure is recorded into the result and the run degrades gracefully instead of crashing.
+`PipelineService` ([`src/pipeline.service.ts`](src/pipeline.service.ts)) is the **orchestrator**. It calls the four stage services in order, wraps each call in `.catch()` so a failure is recorded into `PipelineResult.errors` rather than crashing the run, and pauses for human approval before the send stage.
 
 ---
 
 ## Architecture
 
-The project follows **hexagonal architecture** (ports and adapters) with DDD-style layering. The dependency rule points inward: infrastructure depends on the domain, never the reverse.
+The project uses a **flat, linear architecture** that mirrors the pipeline itself. Each pipeline stage is a NestJS service; `PipelineService` injects them by class and calls them in order. There are no port interfaces, DI tokens, or separate domain/infrastructure layers — the previous hexagonal layout was simplified once it became clear the project would never have alternative implementations of each stage.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        main.ts (CLI)                           │
-│                     composition root                           │
-└───────────────────────────────┬────────────────────────────────┘
-                                 │ resolves
-                                 ▼
-┌──────────────────────────────────────────────────────────────┐
-│  APPLICATION                                                   │
-│  OutreachPipelineService  ── orchestrates the stages           │
-│     depends on ▼ (port interfaces only)                        │
-└───────────────────────────────┬────────────────────────────────┘
-                                 │
-┌────────────────────────────────────────────────────────────────┐
-│  DOMAIN (the hexagon's core — no framework, no vendors)          │
-│                                                                  │
-│  Models:  Company · Contact · EmailPayload · PipelineResult      │
-│                                                                  │
-│  Ports (interfaces):                                             │
-│    CompanyDirectory   findLookalikes(domain)   → Company[]       │
-│    ContactFinder      findDecisionMakers(cos)  → Contact[]       │
-│    EmailResolver      resolveEmails(contacts)  → Contact[]       │
-│    OutreachSender     sendOutreach(contacts)   → number          │
-│    Checkpoint         confirm(contacts)        → boolean         │
-└───────────────────────────────┬────────────────────────────────┘
-                                 │ implemented by ▲
-┌────────────────────────────────────────────────────────────────┐
-│  INFRASTRUCTURE (adapters — the swappable outer ring)            │
-│    OceanAdapter            → CompanyDirectory                    │
-│    ProspeoAdapter          → ContactFinder                       │
-│    EazyreachAdapter        → EmailResolver                       │
-│    BrevoAdapter            → OutreachSender                       │
-│    ConsoleCheckpointAdapter→ Checkpoint                          │
-└──────────────────────────────────────────────────────────────────┘
+                        ┌──────────────────┐
+                        │   main.ts (CLI)   │
+                        │ composition root  │
+                        └────────┬─────────┘
+                                  │
+                                  ▼
+                        ┌──────────────────┐
+                        │ PipelineService   │
+                        │ (orchestrator)    │
+                        └────────┬─────────┘
+        injects ┌──────────────┼─────────────┬──────────────┬──────────────┐
+                ▼              ▼              ▼              ▼              ▼
+        OceanService   ProspeoService    BrevoService  CheckpointService  PipelineLogger
+        (stage 1)      (stages 2 + 3)     (stage 4)    (human review)     (cross-cutting)
 ```
 
-### Why ports and adapters
-
-Each port is a TypeScript `interface` bound to a concrete class through a **`Symbol` DI token** (see [`tokens.ts`](src/outreach/tokens.ts)). Because TypeScript interfaces don't exist at runtime, NestJS can't inject them by type — the Symbol tokens are how the wiring is declared in [`outreach.module.ts`](src/outreach/outreach.module.ts):
-
-```ts
-{ provide: COMPANY_DIRECTORY_PORT, useClass: OceanAdapter }
-```
-
-To swap Ocean.io for another provider you change one line in the module — the orchestrator and domain are untouched.
+**Why this shape:**
+- The pipeline is a fixed, linear sequence with one provider per stage. Hexagonal abstractions added folders without buying optionality.
+- All services live in one `AppModule`. NestJS's DI is still doing real work — it builds the dependency graph and constructs services in the right order — but every dependency is a typed class, so the compiler verifies the wiring.
+- `PipelineLogger` is a plain `@Injectable()` (not a port). It's injected wherever needed.
 
 ---
 
@@ -150,50 +126,35 @@ To swap Ocean.io for another provider you change one line in the module — the 
 
 ```
 src/
-├── main.ts                                  # CLI entry / composition root
-├── outreach/
-│   ├── outreach.module.ts                   # DI wiring (ports → adapters)
-│   ├── tokens.ts                            # Symbol DI tokens for ports
-│   ├── application/
-│   │   └── outreach-pipeline.service.ts     # Orchestrator
-│   ├── domain/
-│   │   ├── models/
-│   │   │   └── outreach.models.ts           # Company, Contact, EmailPayload, PipelineResult
-│   │   └── ports/
-│   │       ├── company-directory.port.ts
-│   │       ├── contact-finder.port.ts
-│   │       ├── email-resolver.port.ts
-│   │       ├── outreach-sender.port.ts
-│   │       └── checkpoint.port.ts
-│   └── infrastructure/
-│       └── adapters/
-│           ├── ocean.adapter.ts             # CompanyDirectory impl (mock)
-│           ├── prospeo.adapter.ts           # ContactFinder impl (mock)
-│           ├── eazyreach.adapter.ts         # EmailResolver impl (mock)
-│           ├── brevo.adapter.ts             # OutreachSender impl (mock)
-│           └── console-checkpoint.adapter.ts# Checkpoint impl (stdin prompt)
-└── shared/
-    ├── logger/
-    │   ├── logger.port.ts                   # LoggerPort interface + token
-    │   ├── logger.module.ts                 # @Global() logger module
-    │   └── pipeline-logger.adapter.ts       # chalk-based console logger
-    └── retry/
-        └── retry.util.ts                    # exponential-backoff retry helper
+├── main.ts                       # CLI entry / composition root
+├── app.module.ts                 # Single NestJS module wiring everything
+├── pipeline.service.ts           # Orchestrator
+├── checkpoint.service.ts         # Interactive review prompt
+├── models.ts                     # Company, Contact, EmailPayload, PipelineResult
+├── stages/
+│   ├── ocean.service.ts          # Stage 1: lookalike companies
+│   ├── prospeo.service.ts        # Stages 2 + 3: contacts + emails
+│   └── brevo.service.ts          # Stage 4: send outreach
+└── utils/
+    ├── pipeline.logger.ts        # Color-coded per-stage console logger
+    └── retry.util.ts             # Exponential-backoff retry helper (currently unused)
 ```
 
 ---
 
 ## The pipeline stages
 
-`OutreachPipelineService.run()` executes four stages plus a checkpoint. Each stage consumes the output of the previous one.
+`PipelineService.run()` executes four stages plus a checkpoint. Each stage consumes the output of the previous one.
 
-| # | Stage             | Port               | Adapter                | Input            | Output         |
-|---|-------------------|--------------------|------------------------|------------------|----------------|
-| 1 | Find lookalikes   | `CompanyDirectory` | `OceanAdapter`         | seed domain      | `Company[]`    |
-| 2 | Find contacts     | `ContactFinder`    | `ProspeoAdapter`       | `Company[]`      | `Contact[]`    |
-| 3 | Resolve emails    | `EmailResolver`    | `EazyreachAdapter`     | `Contact[]`      | `Contact[]`    |
-| — | **Safety review** | `Checkpoint`       | `ConsoleCheckpointAdapter` | `Contact[]`  | `boolean`      |
-| 4 | Send outreach     | `OutreachSender`   | `BrevoAdapter`         | `Contact[]`      | count sent     |
+| # | Stage             | Service             | Method                  | Input            | Output         |
+|---|-------------------|---------------------|-------------------------|------------------|----------------|
+| 1 | Find lookalikes   | `OceanService`      | `findLookalikes`        | seed domain      | `Company[]`    |
+| 2 | Find contacts     | `ProspeoService`    | `findDecisionMakers`    | `Company[]`      | `Contact[]`    |
+| 3 | Resolve emails    | `ProspeoService`    | `resolveEmails`         | `Contact[]`      | `Contact[]`    |
+| — | **Safety review** | `CheckpointService` | `confirm`               | `Contact[]`      | `boolean`      |
+| 4 | Send outreach     | `BrevoService`      | `sendOutreach`          | `Contact[]`      | count sent     |
+
+> Stages 2 and 3 are both Prospeo because the real Prospeo product covers both contact discovery and email verification. Folding them into one service keeps the pipeline honest about the vendor relationship.
 
 ### Failure behavior
 
@@ -201,15 +162,15 @@ src/
 - **Stage 2 (contacts) empty/failed** → run aborts, returns partial result.
 - **Stage 3 (emails) failed** → proceeds with unresolved contacts so the checkpoint can show the gap.
 - **Checkpoint declined** → returns without sending.
-- All caught errors are accumulated in `PipelineResult.errors` with the originating stage.
+- All caught errors are accumulated into `PipelineResult.errors` with the originating stage.
 
 At the end, a summary prints counts for companies found, contacts found, emails resolved, emails sent, errors, and total duration.
 
 ---
 
-## Core domain model
+## Core types
 
-Defined in [`outreach.models.ts`](src/outreach/domain/models/outreach.models.ts):
+Defined in [`src/models.ts`](src/models.ts):
 
 ```ts
 interface Company {
@@ -243,64 +204,50 @@ interface PipelineResult {
 }
 ```
 
-`Contact` is the spine of the pipeline — it's created in Stage 2, enriched with an email in Stage 3, and consumed in Stage 4.
+`Contact` is the spine of the pipeline — created in Stage 2, enriched with an email in Stage 3, and consumed in Stage 4. `EmailPayload` is also defined for the future personalized-message step but isn't used yet.
 
 ---
 
-## Cross-cutting concerns
+## Logging & retry
 
-### Logging
+### `PipelineLogger`
 
-`LoggerModule` is `@Global()`, so the `LoggerPort` is injectable everywhere without re-importing. `PipelineLoggerAdapter` renders per-stage, color-coded console output via `chalk` with `info` / `success` / `warn` / `error` levels plus `divider()` and `banner()` helpers.
+A simple `@Injectable()` console logger that renders per-stage, color-coded output via `chalk` with `info` / `success` / `warn` / `error` levels plus `divider()` and `banner()` helpers. Stages: `ocean`, `prospeo`, `brevo`, `pipeline`, `checkpoint`.
 
-### Retry
+### `RetryUtil`
 
-`RetryUtil` provides `withRetry(fn, context, options)` with:
+`withRetry(fn, context, options)` provides:
 - Exponential backoff (`initialDelayMs * 2^(attempt-1)`, capped at `maxDelayMs`).
 - A retry predicate that retries on `429` and `5xx` (and network errors) but not `4xx`.
 - Honors a `Retry-After` header on `429` responses.
 
-> **Note:** `RetryUtil` is registered in the module but is **not yet injected into the adapters**. Wiring it into the (future) HTTP calls is a roadmap item.
+> **Note:** `RetryUtil` is registered in `AppModule` but is **not yet injected into the stage services**. Wiring it into the (future) HTTP calls is a roadmap item.
 
 ---
 
 ## Extending the pipeline
 
-### Swap a provider
+### Replace a stage's implementation
 
-1. Implement the relevant port, e.g. a new `CompanyDirectory`:
-
-   ```ts
-   @Injectable()
-   export class ClearbitAdapter implements CompanyDirectory {
-     async findLookalikes(seedDomain: string): Promise<Company[]> { /* ... */ }
-   }
-   ```
-
-2. Change the binding in `outreach.module.ts`:
-
-   ```ts
-   { provide: COMPANY_DIRECTORY_PORT, useClass: ClearbitAdapter }
-   ```
-
-Nothing in the domain or application layer changes.
+Edit the relevant service in `src/stages/`. For example, swapping out the mock company-discovery for a real HTTP call means changing the body of `OceanService.findLookalikes` — nothing else in the pipeline touches that method.
 
 ### Add a new stage
 
-1. Define a port interface under `domain/ports/`.
-2. Add a `Symbol` token in `tokens.ts`.
-3. Implement an adapter under `infrastructure/adapters/`.
-4. Register it in `outreach.module.ts` and inject it into the orchestrator.
+1. Create a new service under `src/stages/` with a single public method.
+2. Register it in `app.module.ts` under `providers`.
+3. Inject it into `PipelineService` and add a step in `run()`.
+
+That's it — the simpler structure means you don't need to define an interface, a token, or a separate folder.
 
 ### Run the checkpoint headlessly
 
-Provide an alternative `Checkpoint` implementation (e.g. one that auto-confirms or reads a flag) and bind it to `CHECKPOINT_PORT`.
+`CheckpointService.confirm` could accept a `--yes` flag (or check `process.stdin.isTTY`) to auto-confirm in non-interactive runs. Today it always prompts, which will hang in CI.
 
 ---
 
 ## Configuration
 
-`ConfigModule.forRoot({ isGlobal: true })` is loaded in `outreach.module.ts`, so environment-based configuration is ready to use, but no settings are consumed yet (the adapters are mocks). When real integrations are added, API keys and base URLs should be read through `ConfigService` and validated with a schema.
+`ConfigModule.forRoot({ isGlobal: true })` is loaded in `app.module.ts`, so environment-based configuration is ready to use, but no settings are consumed yet (the stage services are mocks). When real integrations are added, API keys and base URLs should be read through `ConfigService` and validated with a schema.
 
 TypeScript build settings live in [`tsconfig.json`](tsconfig.json) (`strictNullChecks`, `noImplicitAny`, ES2021 target, CommonJS modules).
 
@@ -308,30 +255,29 @@ TypeScript build settings live in [`tsconfig.json`](tsconfig.json) (`strictNullC
 
 ## Limitations & Roadmap
 
-The architecture is production-shaped, but several pieces are intentionally stubbed or not yet wired. In rough priority order:
-
-**Correctness / coupling**
-- [ ] **Decouple the application layer from vendor names.** Rename injected dependencies and `PipelineError.stage` / `LogStage` from vendor names (`ocean`, `prospeo`…) to role-based names (`companyDirectory`, `contactFinder`…). Today the core knows who fulfills each port, which defeats the abstraction.
-
-**Resilience**
-- [ ] **Wire `RetryUtil` into adapters** (or wrap calls in a resilience decorator so adapters stay clean).
-- [ ] **Isolate per-contact failures** and add a concurrency limiter so one bad record doesn't fail an entire batch.
+The architecture is right-sized for the project, but several pieces are intentionally stubbed or not yet wired. In rough priority order:
 
 **Functionality**
-- [ ] **Implement real HTTP integrations** for Ocean.io, Prospeo, Eazyreach, and Brevo.
-- [ ] **Use `EmailPayload` + a `MessageComposer` port** to actually build personalized subject/body content (currently unused; `BrevoAdapter` only logs).
-- [ ] **Read keys/URLs from `ConfigService`** with env-schema validation.
+- [ ] **Implement real HTTP integrations** for Ocean.io, Prospeo, and Brevo (currently mocks with simulated latency).
+- [ ] **Use `EmailPayload` + a message composer** to build personalized subject/body content. Today `BrevoService` only logs that it sent.
+- [ ] **Read keys/URLs from `ConfigService`** with env-schema validation (e.g. via Joi or Zod).
+
+**Resilience**
+- [ ] **Wire `RetryUtil` into stage services** so vendor flakiness doesn't fail an entire run.
+- [ ] **Isolate per-contact failures** in stages 3 and 4 so one bad record doesn't fail an entire batch.
 
 **Operations & compliance**
-- [ ] **Add a persistence/audit layer** (`AuditLog` + `SuppressionList` ports) for idempotency and opt-out handling — re-running currently re-sends to everyone.
-- [ ] **Add a `--yes` / non-interactive flag** so the stdin checkpoint doesn't block CI.
+- [ ] **Add idempotency and a suppression list** — re-running currently re-sends to everyone, which is both an operational and a CAN-SPAM/GDPR issue.
+- [ ] **Add a `--yes` / non-interactive flag** so the stdin checkpoint doesn't block CI runs.
+- [ ] **Route `printSummary` and the checkpoint output through `PipelineLogger`** for a single, consistent output path.
 
 **Quality**
-- [ ] **Add tests** — contract tests per port and property-based tests on pipeline invariants (e.g. "no email is ever sent to a contact without a verified address", "emailsSent ≤ emailsResolved").
-- [ ] **Use the `LoggerPort` consistently** — the summary printout and checkpoint currently use raw `console.log`.
+- [ ] **Add tests.** With direct class injection, unit-testing `PipelineService` against three fake stage services is now straightforward.
+- [ ] **Clean stale `dist/` artifacts** from the previous layout (`rm -rf dist && npm run build`).
+- [ ] **Update `package.json` description** — it still says "with Domain-Driven Design" from the previous architecture.
 
 ---
 
 ## License
 
-Internal — VocalLabs.
+Internal

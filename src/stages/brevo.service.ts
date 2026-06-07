@@ -1,14 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { Contact } from '../../domain/models/outreach.models';
-import { OutreachSender } from '../../domain/ports/outreach-sender.port';
-import { LoggerPort, LOGGER_PORT } from '../../../shared/logger/logger.port';
+import { Injectable } from '@nestjs/common';
+import { Contact } from '../models';
+import { PipelineLogger } from '../utils/pipeline.logger';
 
 @Injectable()
-export class BrevoAdapter implements OutreachSender {
-  constructor(
-    @Inject(LOGGER_PORT)
-    private readonly logger: LoggerPort,
-  ) {}
+export class BrevoService {
+  constructor(private readonly logger: PipelineLogger) {}
 
   async sendOutreach(contacts: Contact[], seedDomain: string): Promise<number> {
     const targetContacts = contacts.filter((c) => c.email);

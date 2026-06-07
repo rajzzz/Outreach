@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { OutreachModule } from './outreach/outreach.module';
-import { OutreachPipelineService } from './outreach/application/outreach-pipeline.service';
+import { AppModule } from './app.module';
+import { PipelineService } from './pipeline.service';
 
 async function bootstrap() {
   const seedDomain = process.argv[2];
@@ -19,11 +19,11 @@ async function bootstrap() {
   }
 
   // Boot NestJS app context (no HTTP server)
-  const app = await NestFactory.createApplicationContext(OutreachModule, {
+  const app = await NestFactory.createApplicationContext(AppModule, {
     logger: false, // silence NestJS internal logs
   });
 
-  const pipeline = app.get(OutreachPipelineService);
+  const pipeline = app.get(PipelineService);
 
   try {
     await pipeline.run(seedDomain);
