@@ -33,7 +33,7 @@ export class ProspeoService {
     );
 
     this.maxContactsPerCompany = parseInt(
-      this.config.get<string>('MAX_CONTACTS_PER_COMPANY', '3'),
+      this.config.get<string>('MAX_CONTACTS_PER_COMPANY', '5'),
       10,
     );
   }

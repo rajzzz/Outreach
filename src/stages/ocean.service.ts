@@ -19,8 +19,8 @@ export class OceanService {
   ) {
     this.apiKey = this.config.get<string>('OCEAN_API_KEY')!;
     this.baseUrl = this.config.get<string>('OCEAN_BASE_URL', 'https://api.ocean.io');
-    this.pageSize = parseInt(this.config.get<string>('OCEAN_PAGE_SIZE', '50'), 10);
-    this.maxCompanies = parseInt(this.config.get<string>('MAX_COMPANIES', '300'), 10);
+    this.pageSize = parseInt(this.config.get<string>('OCEAN_PAGE_SIZE', '10'), 10);
+    this.maxCompanies = parseInt(this.config.get<string>('MAX_COMPANIES', '20'), 10);
   }
 
   /**

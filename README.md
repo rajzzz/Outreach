@@ -101,43 +101,43 @@ src/
 
 ## Edge Case Handling
 
-| Failure mode | Behavior |
-|---|---|
-| Invalid/missing CLI domain | Regex validation → usage message, exits before any API call |
-| Missing env var | Fail-fast at startup with list of missing keys |
-| Ocean.io returns 0 companies | Aborts after Stage 1 with zeroed result |
-| Transient API failure (429/5xx) | Retries with exponential backoff, honors `Retry-After` |
-| Prospeo search fails for one domain | Logged + skipped, other domains continue |
-| Prospeo returns 0 contacts total | Aborts after Stage 2 with partial result |
-| Contact has no person_id or LinkedIn URL | Marked unverified, kept in list, no credit spent |
-| Enrich returns NO_MATCH | Contact kept with `emailVerified: false`, loop continues |
-| Email found but unverified | Shown in red at checkpoint, **never sent** |
-| User declines at checkpoint | No emails sent, result shows what was discovered |
-| `DRY_RUN=true` | Send stage skipped entirely |
-| Duplicate emails across contacts | Deduplicated — one send per unique email |
-| Brevo rejects a single send | Logged, added to errors array, other sends continue |
-| Ctrl+C / SIGTERM | Nest context closed cleanly, exits 130 |
-| Unhandled rejection / uncaught exception | Clean one-line message, exits 1 (no stack trace dump) |
+| Failure mode                             | Behavior                                                    |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| Invalid/missing CLI domain               | Regex validation → usage message, exits before any API call |
+| Missing env var                          | Fail-fast at startup with list of missing keys              |
+| Ocean.io returns 0 companies             | Aborts after Stage 1 with zeroed result                     |
+| Transient API failure (429/5xx)          | Retries with exponential backoff, honors `Retry-After`      |
+| Prospeo search fails for one domain      | Logged + skipped, other domains continue                    |
+| Prospeo returns 0 contacts total         | Aborts after Stage 2 with partial result                    |
+| Contact has no person_id or LinkedIn URL | Marked unverified, kept in list, no credit spent            |
+| Enrich returns NO_MATCH                  | Contact kept with `emailVerified: false`, loop continues    |
+| Email found but unverified               | Shown in red at checkpoint, **never sent**                  |
+| User declines at checkpoint              | No emails sent, result shows what was discovered            |
+| `DRY_RUN=true`                           | Send stage skipped entirely                                 |
+| Duplicate emails across contacts         | Deduplicated — one send per unique email                    |
+| Brevo rejects a single send              | Logged, added to errors array, other sends continue         |
+| Ctrl+C / SIGTERM                         | Nest context closed cleanly, exits 130                      |
+| Unhandled rejection / uncaught exception | Clean one-line message, exits 1 (no stack trace dump)       |
 
 ---
 
 ## Configuration
 
-| Variable | Required | Default | Purpose |
-|---|:---:|---|---|
-| `OCEAN_API_KEY` | ✅ | — | Ocean.io auth |
-| `OCEAN_BASE_URL` | | `https://api.ocean.io` | Ocean.io base URL |
-| `OCEAN_PAGE_SIZE` | | `50` | Results per Ocean page |
-| `PROSPEO_API_KEY` | ✅ | — | Prospeo auth |
-| `PROSPEO_BASE_URL` | | `https://api.prospeo.io` | Prospeo base URL |
-| `PROSPEO_SENIORITY_FILTER` | | `C-Suite,Vice President,Founder/Owner` | Seniority levels to target |
-| `BREVO_API_KEY` | ✅ | — | Brevo auth |
-| `BREVO_BASE_URL` | | `https://api.brevo.com/v3` | Brevo base URL |
-| `BREVO_SENDER_NAME` | | `Raj` | From-name on outreach |
-| `BREVO_SENDER_EMAIL` | ✅ | — | From-address (must be verified in Brevo) |
-| `MAX_COMPANIES` | | `10` | Cap on lookalike companies |
-| `MAX_CONTACTS_PER_COMPANY` | | `3` | Cap on contacts per company |
-| `DRY_RUN` | | `true` | Skip Brevo send stage when true |
+| Variable                   | Required | Default                                | Purpose                                  |
+| -------------------------- | :------: | -------------------------------------- | ---------------------------------------- |
+| `OCEAN_API_KEY`            |    ✅    | —                                      | Ocean.io auth                            |
+| `OCEAN_BASE_URL`           |          | `https://api.ocean.io`                 | Ocean.io base URL                        |
+| `OCEAN_PAGE_SIZE`          |          | `10`                                   | Results per Ocean page                   |
+| `PROSPEO_API_KEY`          |    ✅    | —                                      | Prospeo auth                             |
+| `PROSPEO_BASE_URL`         |          | `https://api.prospeo.io`               | Prospeo base URL                         |
+| `PROSPEO_SENIORITY_FILTER` |          | `C-Suite,Vice President,Founder/Owner` | Seniority levels to target               |
+| `BREVO_API_KEY`            |    ✅    | —                                      | Brevo auth                               |
+| `BREVO_BASE_URL`           |          | `https://api.brevo.com/v3`             | Brevo base URL                           |
+| `BREVO_SENDER_NAME`        |          | `Raj`                                  | From-name on outreach                    |
+| `BREVO_SENDER_EMAIL`       |    ✅    | —                                      | From-address (must be verified in Brevo) |
+| `MAX_COMPANIES`            |          | `20`                                   | Cap on lookalike companies               |
+| `MAX_CONTACTS_PER_COMPANY` |          | `5`                                    | Cap on contacts per company              |
+| `DRY_RUN`                  |          | `true`                                 | Skip Brevo send stage when true          |
 
 ---
 
