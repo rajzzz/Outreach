@@ -171,7 +171,7 @@ src/
 |---|-------------------|--------------------------------------|------------------|----------------|
 | 1 | Find lookalikes   | `OceanService` → `POST /v3/search/companies` | seed domain | `Company[]`    |
 | 2 | Find contacts     | `ProspeoService` → `POST /search-person`     | `Company[]` | `Contact[]`    |
-| 3 | Resolve emails    | `ProspeoService` → `POST /bulk-enrich-person`| `Contact[]` | `Contact[]`    |
+| 3 | Resolve emails    | `ProspeoService` → `POST /linkedin-email-finder` | `Contact[]` | `Contact[]`    |
 | — | **Safety review** | `CheckpointService` (stdin prompt)   | `Contact[]`      | `boolean`      |
 | 4 | Send outreach     | `BrevoService` → `POST /smtp/email`  | `Contact[]`      | count sent     |
 
@@ -179,7 +179,12 @@ src/
 
 - **Stage 1 — Ocean.io.** Cursor-based pagination via `searchAfter`, `OCEAN_PAGE_SIZE` results per page. Stops when the cursor runs out **or** `MAX_COMPANIES` is reached, then trims to the exact cap. Auth via `X-Api-Token`.
 - **Stage 2 — Prospeo search.** Iterates each company domain with page-based pagination, filtering by a configurable `PROSPEO_SENIORITY_FILTER` (defaults to C-suite + VP titles). Caps results to `MAX_CONTACTS_PER_COMPANY` per company. Auth via `X-KEY`.
-- **Stage 3 — Prospeo enrich.** Bulk-enriches contacts in chunks of 50 (`bulk-enrich-person`), requesting verified emails only (`only_verified_email: true`). Contacts without a resolvable email are kept (so the checkpoint can show the gap) but left without an `email`.
+- **Stage 3 — Prospeo LinkedIn email finder.** Resolves each contact's LinkedIn URL to a verified work email (`POST /linkedin-email-finder`). Designed to be **credit-conscious**:
+  - **Sequential calls**, no parallelism — a flood of failures can't burn credits before the loop notices.
+  - **Per-URL deduplication** within the batch — a LinkedIn URL shared across multiple contacts costs exactly one credit. Failures are cached too, so a bad URL isn't retried.
+  - **Skips contacts that already have an email** — zero credits spent.
+  - **Per-contact failure isolation** — a failed lookup marks `emailVerified: false` and keeps the contact (so the checkpoint can show the gap) instead of dropping it or aborting the batch.
+  - **Best-effort credit balance log** at the start of the stage (silent if the endpoint shape isn't supported by your plan).
 - **Stage 4 — Brevo.** Sends one personalized transactional email per contact with a verified address, throttled to ~2 RPS (500ms between sends) to respect rate limits. Auth via `api-key`. Skipped entirely when `DRY_RUN=true`.
 
 ### Failure behavior
@@ -313,8 +318,7 @@ Done in recent work: ✅ live Ocean.io / Prospeo / Brevo integrations with auth 
 Still outstanding, in rough priority order:
 
 **Resilience**
-- [ ] **Per-contact failure isolation in Stage 3/4.** A thrown error on a bulk-enrich chunk or a single send still fails that chunk/loop; individual bad records could be caught and skipped instead of bubbling up.
-- [ ] **Concurrency for Stage 2.** Companies are searched sequentially; a bounded-concurrency map would cut wall-clock time on larger `MAX_COMPANIES`.
+- [ ] **Concurrency for Stage 2.** Companies are searched sequentially; a bounded-concurrency map would cut wall-clock time on larger `MAX_COMPANIES`. Stage 3 stays sequential by design (credit safety).
 
 **Operations & compliance**
 - [ ] **Idempotency and a suppression list.** Re-running re-sends to everyone — an operational and CAN-SPAM/GDPR concern. No record of who was already contacted.

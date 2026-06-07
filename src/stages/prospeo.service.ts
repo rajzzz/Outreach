@@ -5,6 +5,11 @@ import { Company, Contact } from '../models';
 import { RetryUtil } from '../utils/retry.util';
 import { PipelineLogger } from '../utils/pipeline.logger';
 
+interface CachedEmailResult {
+  email?: string;
+  verified: boolean;
+}
+
 @Injectable()
 export class ProspeoService {
   private readonly apiKey: string;
@@ -110,10 +115,18 @@ export class ProspeoService {
   }
 
   /**
-   * Stage 3 — Resolve and verify work emails via Prospeo Bulk Enrich Person API.
+   * Stage 3 — Resolve each contact's LinkedIn URL to a verified work email
+   * via Prospeo's `linkedin-email-finder` endpoint.
    *
-   * Processes contacts in chunks of 50 (Prospeo's bulk-enrich limit).
-   * Only returns verified emails (`only_verified_email: true`).
+   * Credit-conscious by design:
+   *   - Sequential calls (no concurrency) so a flood of failures can't burn
+   *     credits before the loop notices.
+   *   - Deduplicates LinkedIn URLs within the batch — a URL shared by multiple
+   *     contacts costs exactly one credit.
+   *   - Contacts that already carry a resolved email are passed through
+   *     untouched (zero credits spent).
+   *   - Failures mark `emailVerified: false` and keep the contact, never
+   *     drop it. The checkpoint will surface the gap.
    */
   async resolveEmails(contacts: Contact[]): Promise<Contact[]> {
     this.logger.info(
@@ -121,60 +134,158 @@ export class ProspeoService {
       `Resolving and verifying work email addresses for ${contacts.length} contacts...`,
     );
 
-    const CHUNK_SIZE = 50;
+    // Best-effort credit balance log. Silent if the endpoint shape differs.
+    await this.logCreditBalance();
+
+    const cache = new Map<string, CachedEmailResult>();
     const enriched: Contact[] = [];
+    let apiCalls = 0;
 
-    for (let i = 0; i < contacts.length; i += CHUNK_SIZE) {
-      const chunk = contacts.slice(i, i + CHUNK_SIZE);
-      const batchNum = Math.floor(i / CHUNK_SIZE) + 1;
+    for (const contact of contacts) {
+      // 1. Skip contacts that already have an email — zero credits spent.
+      if (contact.email) {
+        enriched.push(contact);
+        continue;
+      }
 
-      const response = await this.retry.withRetry(
-        () =>
-          axios.post(
-            `${this.baseUrl}/bulk-enrich-person`,
-            {
-              data: chunk.map((c) => ({ person_id: c.prospeoPersonId })),
-              only_verified_email: true,
-            },
-            {
-              headers: {
-                'X-KEY': this.apiKey,
-                'Content-Type': 'application/json',
-              },
-            },
-          ),
-        `prospeo.bulkEnrich[batch${batchNum}]`,
-      );
+      // 2. No LinkedIn URL → can't resolve. Keep the contact, mark unverified.
+      const rawUrl = contact.linkedinUrl?.trim();
+      if (!rawUrl) {
+        this.logger.warn(
+          'prospeo',
+          `No LinkedIn URL for ${contact.fullName} — skipping enrichment`,
+        );
+        enriched.push({ ...contact, emailVerified: false });
+        continue;
+      }
 
-      const results = response.data.results ?? [];
+      // 3. Dedupe by normalized URL — reuse the cached result for free.
+      const normalizedUrl = this.normalizeLinkedinUrl(rawUrl);
+      const cached = cache.get(normalizedUrl);
+      if (cached) {
+        enriched.push(this.applyEmailResult(contact, cached));
+        this.logger.info(
+          'prospeo',
+          `Reused cached result for ${contact.fullName} (${normalizedUrl})`,
+        );
+        continue;
+      }
 
-      for (let j = 0; j < chunk.length; j++) {
-        const result = results[j];
-        const contact = chunk[j];
+      // 4. Sequential API call. Failures are isolated to this contact.
+      try {
+        const result = await this.findEmailByLinkedin(normalizedUrl);
+        apiCalls++;
+        cache.set(normalizedUrl, result);
+        enriched.push(this.applyEmailResult(contact, result));
 
-        if (result?.email) {
-          enriched.push({
-            ...contact,
-            email: result.email,
-            emailVerified: result.email_verified ?? false,
-            mobile: result.mobile,
-          });
-          this.logger.success('prospeo', `Resolved and verified email: ${result.email}`);
+        if (result.email) {
+          this.logger.success(
+            'prospeo',
+            `Resolved ${contact.fullName} → ${result.email} (verified: ${result.verified})`,
+          );
         } else {
           this.logger.warn(
             'prospeo',
             `Could not find a valid email for ${contact.fullName} at ${contact.domain}`,
           );
-          enriched.push(contact);
         }
+      } catch (err: any) {
+        // Cache the failure too — retrying the same URL would cost another credit.
+        const failed: CachedEmailResult = { verified: false };
+        cache.set(normalizedUrl, failed);
+        enriched.push(this.applyEmailResult(contact, failed));
+        this.logger.error(
+          'prospeo',
+          `Enrichment failed for ${contact.fullName}: ${err.message}`,
+        );
       }
     }
 
     const successCount = enriched.filter((c) => c.email).length;
     this.logger.success(
       'prospeo',
-      `Completed email resolution: ${successCount}/${contacts.length} emails resolved.`,
+      `Completed email resolution: ${successCount}/${contacts.length} emails resolved ` +
+        `(${apiCalls} API call${apiCalls === 1 ? '' : 's'}, ${cache.size} unique URL${cache.size === 1 ? '' : 's'}).`,
     );
     return enriched;
+  }
+
+  private async findEmailByLinkedin(linkedinUrl: string): Promise<CachedEmailResult> {
+    const response = await this.retry.withRetry(
+      () =>
+        axios.post(
+          `${this.baseUrl}/linkedin-email-finder`,
+          { url: linkedinUrl },
+          {
+            headers: {
+              'X-KEY': this.apiKey,
+              'Content-Type': 'application/json',
+            },
+          },
+        ),
+      `prospeo.linkedinEmailFinder[${linkedinUrl}]`,
+    );
+
+    // Prospeo wraps successful responses in `response`; parse defensively
+    // so a shape change doesn't crash the run.
+    const data = response.data?.response ?? response.data ?? {};
+    const email: string | undefined = data.email;
+    const verified =
+      data.email_status === 'VERIFIED' ||
+      data.email_status === 'verified' ||
+      data.email_verified === true;
+
+    return { email, verified };
+  }
+
+  private applyEmailResult(contact: Contact, result: CachedEmailResult): Contact {
+    if (result.email) {
+      return {
+        ...contact,
+        email: result.email,
+        emailVerified: result.verified,
+      };
+    }
+    return { ...contact, emailVerified: false };
+  }
+
+  /**
+   * Normalize LinkedIn URLs for dedup: trim, lowercase, strip trailing
+   * slashes. Keeps protocol + host so we don't accidentally collide
+   * different profiles.
+   */
+  private normalizeLinkedinUrl(url: string): string {
+    return url.trim().toLowerCase().replace(/\/+$/, '');
+  }
+
+  /**
+   * Best-effort credit balance probe. Exact shape varies across Prospeo
+   * plans, so swallow errors and silently continue rather than failing the
+   * run on a missing introspection feature.
+   */
+  private async logCreditBalance(): Promise<void> {
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/account-information`,
+        {},
+        {
+          headers: {
+            'X-KEY': this.apiKey,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+      const data = response.data?.response ?? response.data ?? {};
+      const balance =
+        data.remaining_credits ??
+        data.credits ??
+        data.balance ??
+        data.remaining;
+      if (typeof balance === 'number') {
+        this.logger.info('prospeo', `Credits remaining: ${balance}`);
+      }
+    } catch {
+      // Endpoint not exposed for this plan or different shape — ignore.
+    }
   }
 }
