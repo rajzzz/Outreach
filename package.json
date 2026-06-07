@@ -1,7 +1,7 @@
 {
   "name": "vocal-labs-outreach",
   "version": "1.0.0",
-  "description": "VocalLabs Outreach Pipeline with Domain-Driven Design",
+  "description": "One domain in, personalized outreach out. CLI pipeline: Ocean.io → Prospeo → Brevo.",
   "main": "dist/main.js",
   "scripts": {
     "build": "nest build",
