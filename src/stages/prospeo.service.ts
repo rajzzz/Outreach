@@ -9,7 +9,7 @@ import { PipelineLogger } from '../utils/pipeline.logger';
 export class ProspeoService {
   private readonly apiKey: string;
   private readonly baseUrl: string;
-  private readonly seniorityFilter: string[];
+  private readonly seniorityFilter: string;
   private readonly maxContactsPerCompany: number;
 
   constructor(
@@ -21,11 +21,10 @@ export class ProspeoService {
     this.baseUrl = this.config.get<string>('PROSPEO_BASE_URL', 'https://api.prospeo.io');
 
     // Sensible C-suite + VP defaults, overridable via .env
-    const defaultSeniority = 'CEO,CTO,COO,CFO,VP Engineering,VP Product,Head of Engineering';
-    this.seniorityFilter = this.config
-      .get<string>('PROSPEO_SENIORITY_FILTER', defaultSeniority)
-      .split(',')
-      .map((s) => s.trim());
+    this.seniorityFilter = this.config.get<string>(
+      'PROSPEO_SENIORITY_FILTER',
+      'C_SUITE,VP',
+    );
 
     this.maxContactsPerCompany = parseInt(
       this.config.get<string>('MAX_CONTACTS_PER_COMPANY', '3'),
@@ -33,81 +32,74 @@ export class ProspeoService {
     );
   }
 
-  private get headers() {
-    return {
-      'X-KEY': this.apiKey,
-      'Content-Type': 'application/json',
-    };
-  }
-
   /**
-   * Stage 2 — Find decision-makers for each company via Prospeo Search Person API.
+   * Stage 2 — Find decision-makers for each company via Prospeo Domain Search.
    *
-   * Iterates through each company domain, using page-based pagination
-   * (25 results/page). Filters by configurable seniority levels.
-   * Caps contacts per company to `MAX_CONTACTS_PER_COMPANY`.
+   * GET /domain-search  ?domain=...&seniority=C_SUITE,VP
+   * → { contacts: [{ firstName, lastName, title, linkedin_url }] }
+   *
+   * Processes companies sequentially to respect rate limits.
+   * Per-domain error isolation — one failing domain doesn't crash the run.
+   * Caps contacts per company to MAX_CONTACTS_PER_COMPANY.
    */
   async findDecisionMakers(companies: Company[]): Promise<Contact[]> {
     this.logger.info(
       'prospeo',
       `Finding decision-makers for ${companies.length} companies...`,
     );
+    this.logger.info('prospeo', `Seniority filter: ${this.seniorityFilter}`);
 
     const contacts: Contact[] = [];
 
-    this.logger.info(
-      'prospeo',
-      `Seniority filter: ${this.seniorityFilter.join(', ')}`,
-    );
-
     for (const company of companies) {
-      let page = 1;
-      let totalPages = 1;
-      let companyContacts = 0;
-
-      do {
+      try {
         const response = await this.retry.withRetry(
           () =>
-            axios.post(
-              `${this.baseUrl}/search-person`,
-              {
-                filters: {
-                  person_search: company.domain,
-                  person_seniority: this.seniorityFilter,
-                },
-                page,
+            axios.get(`${this.baseUrl}/domain-search`, {
+              params: {
+                domain: company.domain,
+                seniority: this.seniorityFilter,
               },
-              { headers: this.headers },
-            ),
-          `prospeo.search[${company.domain}:p${page}]`,
+              headers: {
+                'X-KEY': this.apiKey,
+                'Content-Type': 'application/json',
+              },
+            }),
+          `prospeo.domainSearch[${company.domain}]`,
         );
 
-        const data = response.data;
-        totalPages = data.pagination?.total_page ?? 1;
+        const results = response.data.contacts ?? [];
 
-        for (const person of data.results ?? []) {
-          if (companyContacts >= this.maxContactsPerCompany) break;
+        // Cap contacts per company
+        const capped = results.slice(0, this.maxContactsPerCompany);
 
+        for (const person of capped) {
           contacts.push({
-            firstName: person.first_name,
-            lastName: person.last_name,
-            fullName: person.full_name,
-            title: person.job_title,
+            firstName: person.firstName ?? person.first_name ?? '',
+            lastName: person.lastName ?? person.last_name ?? '',
+            fullName:
+              person.fullName ??
+              person.full_name ??
+              `${person.firstName ?? person.first_name ?? ''} ${person.lastName ?? person.last_name ?? ''}`.trim(),
+            title: person.title ?? person.job_title ?? '',
             company: company.name ?? company.domain,
             domain: company.domain,
-            linkedinUrl: person.linkedin_url ?? '',
+            linkedinUrl: person.linkedin_url ?? person.linkedinUrl ?? '',
             prospeoPersonId: person.person_id,
           });
-          companyContacts++;
         }
 
-        this.logger.info(
+        this.logger.success(
           'prospeo',
-          `[${company.domain}] Page ${page}/${totalPages} — ${companyContacts}/${this.maxContactsPerCompany} contacts`,
+          `[${company.domain}] ${capped.length}/${this.maxContactsPerCompany} contacts found`,
         );
-
-        page++;
-      } while (page <= totalPages && companyContacts < this.maxContactsPerCompany);
+      } catch (error: any) {
+        // Per-domain error isolation — log and continue, don't crash
+        this.logger.warn(
+          'prospeo',
+          `[${company.domain}] Skipped — ${error.message}`,
+        );
+      }
     }
 
     this.logger.success(
@@ -144,7 +136,12 @@ export class ProspeoService {
               data: chunk.map((c) => ({ person_id: c.prospeoPersonId })),
               only_verified_email: true,
             },
-            { headers: this.headers },
+            {
+              headers: {
+                'X-KEY': this.apiKey,
+                'Content-Type': 'application/json',
+              },
+            },
           ),
         `prospeo.bulkEnrich[batch${batchNum}]`,
       );
